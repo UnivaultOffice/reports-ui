@@ -1,0 +1,32 @@
+[
+  {
+    "id": "tpl-contract",
+    "name": "Отчет по контракту",
+    "descr": "Заполнение реквизитов и условия скрытия строк",
+    "updated": "04.02.2026",
+    "last_run": "04.02.2026",
+    "type": "XLSX",
+    "path": "reports-ui/templates/Книга1.xlsx",
+    "category": "Контракты",
+    "owner": "Финансы",
+    "fields": 18,
+    "sheets": 3,
+    "status": "active",
+    "tags": ["Госзаказ", "Калькуляция"]
+  },
+  {
+    "id": "tpl-estimate",
+    "name": "Смета по этапам",
+    "descr": "Группировки + формулы в значения",
+    "updated": "01.02.2026",
+    "last_run": "02.02.2026",
+    "type": "XLSX",
+    "path": "reports-ui/templates/Книга1.xlsx",
+    "category": "Бюджет",
+    "owner": "Проекты",
+    "fields": 12,
+    "sheets": 2,
+    "status": "draft",
+    "tags": ["Этапы", "Формулы"]
+  }
+]

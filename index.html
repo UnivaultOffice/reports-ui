@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reports</title>
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <div id="app" class="reports-app">
+    <section id="reports-view" class="reports-view">
+      <header class="reports-header">
+        <div class="reports-title" data-i18n="title">Reports</div>
+        <div class="reports-actions">
+          <div class="reports-search">
+            <input id="search" type="text" data-i18n-placeholder="search" placeholder="Search reports" />
+          </div>
+          <button id="btn-settings" class="btn" data-i18n="settings">Settings</button>
+          <button id="btn-create" class="btn btn-primary" data-i18n="create">Create</button>
+        </div>
+      </header>
+
+      <section id="reports-list" class="reports-list"></section>
+
+      <div id="reports-empty" class="reports-empty" hidden>
+        <h3 data-i18n="empty_title">No templates yet</h3>
+        <p data-i18n="empty_text">Add a template in settings to start generating reports.</p>
+      </div>
+    </section>
+
+    <section id="settings-view" class="reports-settings hidden">
+      <header class="settings-header">
+        <div class="settings-left">
+          <button id="btn-back" class="btn btn-ghost">←</button>
+          <div class="settings-title" data-i18n="settings_title">Template settings</div>
+        </div>
+        <div class="settings-actions">
+          <button id="btn-save" class="btn btn-primary" data-i18n="save">Save</button>
+          <button id="btn-close" class="btn" data-i18n="close">Close</button>
+        </div>
+      </header>
+
+      <div class="settings-body">
+        <aside class="settings-nav">
+          <button class="settings-nav-item active" data-section="general" data-i18n="settings_general">General</button>
+          <button class="settings-nav-item" data-section="fields" data-i18n="settings_fields">Fields</button>
+          <button class="settings-nav-item" data-section="rules" data-i18n="settings_rules">Rules</button>
+          <button class="settings-nav-item" data-section="actions" data-i18n="settings_actions">Actions</button>
+          <button class="settings-nav-item" data-section="test" data-i18n="settings_test">Test</button>
+        </aside>
+
+        <div class="settings-content">
+          <section class="settings-section" id="section-general">
+            <h3 data-i18n="settings_general">General</h3>
+            <div class="form-grid">
+              <label class="form-field">
+                <span data-i18n="template_name">Template name</span>
+                <input type="text" value="Отчет по контракту" />
+              </label>
+              <label class="form-field">
+                <span data-i18n="template_file">Template file</span>
+                <div class="field-row">
+                  <input id="template-file-path" type="text" value="contract_template.xlsx" readonly />
+                  <button id="template-file-btn" class="btn btn-small btn-ghost" data-i18n="choose">Choose</button>
+                </div>
+                <small class="form-help" data-i18n="template_file_help">Files will be stored in reports-ui/templates.</small>
+              </label>
+              <input id="template-file-input" type="file" accept=".xlsx,.xlsm,.xls" hidden />
+              <label class="form-field">
+                <span data-i18n="default_sheet">Default sheet</span>
+                <select>
+                  <option data-i18n="sheet_any">Any sheet</option>
+                  <option>Лист 1</option>
+                  <option>Лист 2</option>
+                </select>
+              </label>
+              <label class="form-field">
+                <span data-i18n="key_scope">Key search scope</span>
+                <select>
+                  <option data-i18n="scope_workbook">Whole workbook</option>
+                  <option data-i18n="scope_sheet">Single sheet</option>
+                  <option data-i18n="scope_sheets">Sheet list</option>
+                  <option data-i18n="scope_named">Named ranges only</option>
+                </select>
+                <small class="form-help" data-i18n="key_scope_help">Choose whether keys are searched across the whole workbook or a specific sheet.</small>
+              </label>
+              <label class="form-field">
+                <span data-i18n="scope_sheet_label">Sheet to search</span>
+                <select>
+                  <option data-i18n="sheet_any">Any sheet</option>
+                  <option>Лист 1</option>
+                  <option>Лист 2</option>
+                </select>
+              </label>
+              <label class="form-field">
+                <span data-i18n="key_format">Key format</span>
+                <input type="text" value="{{key}}" />
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-section" id="section-fields">
+            <div class="section-header">
+              <h3 data-i18n="settings_fields">Fields</h3>
+              <button class="btn btn-small btn-ghost" disabled data-i18n="add_field">Add field</button>
+            </div>
+            <div class="fields-table">
+              <div class="fields-row fields-header">
+                <span data-i18n="field_name">Name</span>
+                <span data-i18n="field_key">Key</span>
+                <span data-i18n="field_type">Type</span>
+                <span data-i18n="field_required">Required</span>
+                <span data-i18n="field_scope">Scope</span>
+                <span data-i18n="field_sheet">Sheet</span>
+                <span data-i18n="field_target">Target</span>
+              </div>
+              <div class="fields-row">
+                <span>Номер контракта</span>
+                <span>contract_number</span>
+                <span data-i18n="type_text">Text</span>
+                <span>✓</span>
+                <span data-i18n="scope_sheet">Single sheet</span>
+                <span>Лист 1</span>
+                <span>A6</span>
+              </div>
+              <div class="fields-row">
+                <span>Дата подписания</span>
+                <span>contract_date</span>
+                <span data-i18n="type_date">Date</span>
+                <span>✓</span>
+                <span data-i18n="scope_workbook">Whole workbook</span>
+                <span data-i18n="sheet_any">Any sheet</span>
+                <span>{{contract_date}}</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-section" id="section-rules">
+            <div class="section-header">
+              <h3 data-i18n="settings_rules">Rules</h3>
+              <button class="btn btn-small btn-ghost" disabled data-i18n="add_rule">Add rule</button>
+            </div>
+            <div class="rule-card">
+              <div class="rule-header" data-i18n="rule_if">IF</div>
+              <div class="rule-body">
+                <div class="rule-row">
+                  <select>
+                    <option>contract_date</option>
+                    <option>contract_number</option>
+                  </select>
+                  <select>
+                    <option data-i18n="cond_empty">is empty</option>
+                    <option data-i18n="cond_not_empty">is not empty</option>
+                  </select>
+                  <select>
+                    <option data-i18n="scope_sheet">Single sheet</option>
+                    <option data-i18n="scope_workbook">Whole workbook</option>
+                  </select>
+                  <select>
+                    <option>Лист 1</option>
+                    <option>Лист 2</option>
+                  </select>
+                </div>
+              </div>
+              <div class="rule-header" data-i18n="rule_then">THEN</div>
+              <div class="rule-body">
+                <div class="rule-row">
+                  <select>
+                    <option data-i18n="action_hide_row">Hide row</option>
+                    <option data-i18n="action_show_row">Show row</option>
+                    <option data-i18n="action_set_value">Set value</option>
+                  </select>
+                  <input type="text" value="12" />
+                  <select>
+                    <option data-i18n="scope_sheet">Single sheet</option>
+                    <option data-i18n="scope_workbook">Whole workbook</option>
+                  </select>
+                  <select>
+                    <option>Лист 1</option>
+                    <option>Лист 2</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-section" id="section-actions">
+            <div class="section-header">
+              <h3 data-i18n="settings_actions">Actions</h3>
+              <button class="btn btn-small btn-ghost" disabled data-i18n="add_action">Add action</button>
+            </div>
+            <div class="actions-layout">
+              <div id="actions-list" class="actions-list"></div>
+              <div class="form-preview">
+                <div class="form-preview-header">
+                  <h4 data-i18n="form_preview">Form preview</h4>
+                  <span class="form-preview-sub" data-i18n="form_preview_hint">Fields required before execution</span>
+                </div>
+                <div id="form-preview-body" class="form-preview-body"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-section" id="section-test">
+            <div class="section-header">
+              <h3 data-i18n="settings_test">Test</h3>
+              <button class="btn btn-small btn-primary" disabled data-i18n="run_test">Run test</button>
+            </div>
+            <div class="test-panel">
+              <div class="test-log">
+                <div>[info] data loaded</div>
+                <div>[info] waiting for run</div>
+              </div>
+              <div class="test-preview">
+                <div class="preview-placeholder" data-i18n="preview_placeholder">Preview will appear here</div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

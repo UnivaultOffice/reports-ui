@@ -1,0 +1,14 @@
+[
+  {
+    "id": "contractNumber",
+    "label": "Номер контракта",
+    "type": "text",
+    "target": "Sheet1!B10"
+  },
+  {
+    "id": "signDate",
+    "label": "Дата подписания",
+    "type": "date",
+    "target": "Sheet1!B11"
+  }
+]
