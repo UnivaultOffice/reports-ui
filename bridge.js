@@ -83,20 +83,23 @@
     if (!data) return;
     var job = data.job || {};
     var templateId = data.templateId || job.templateId || null;
-    log('reportsRun received', { path: data.path, jobId: job.id || '', typeId: data.typeId || 0 });
+    log('reportsRun received', { path: data.path, jobId: job.id || '', typeId: data.typeId || 0, debug: !!data.debug });
 
     try {
       if (window.sdk && data.path) {
         log('create:new', { path: data.path });
-        window.sdk.command('create:new', JSON.stringify({
+        var payload = JSON.stringify({
           template: {
             id: templateId,
             type: data.typeId || 0,
             path: data.path
           }
-        }));
+        });
+        log('create:new payload', payload);
+        window.sdk.command('create:new', payload);
       }
     } catch (e) {
+      log('create:new error', { error: String(e) });
       // ignore
     }
 
@@ -120,6 +123,7 @@
           window.AscDesktopEditor.CallInAllWindows(script);
         }
       } catch (e) {
+        log('sendScript error', { error: String(e) });
         // ignore
       }
     }
@@ -135,6 +139,9 @@
 
   window.addEventListener('message', function (evt) {
     var msg = parseMessage(evt.data);
+    try {
+      if (msg) log('message received', msg);
+    } catch (e) { /* ignore */ }
     if (msg && msg.type === 'reports:debug' && msg.data) {
       log('runtime', msg.data);
       return;

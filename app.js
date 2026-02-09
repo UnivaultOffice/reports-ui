@@ -1,6 +1,10 @@
 const REPORTS_DEBUG_DEFAULT = true;
+const REPORTS_LOG_ALL_DEFAULT = true;
 if (typeof window !== 'undefined' && typeof window.REPORTS_DEBUG === 'undefined') {
   window.REPORTS_DEBUG = REPORTS_DEBUG_DEFAULT;
+}
+if (typeof window !== 'undefined' && typeof window.REPORTS_LOG_ALL === 'undefined') {
+  window.REPORTS_LOG_ALL = REPORTS_LOG_ALL_DEFAULT;
 }
 
 const state = {
@@ -10,7 +14,9 @@ const state = {
   selectedId: null,
   actions: [],
   debugLog: [],
-  parentLogIndex: 0
+  parentLogIndex: 0,
+  pendingRun: null,
+  pendingRunTimer: null
 };
 
 const DEFAULT_I18N = {
@@ -300,6 +306,7 @@ function renderActions() {
   const root = els.actionsList();
   if (!root) return;
   root.innerHTML = '';
+  logAll('renderActions', { count: state.actions.length });
 
   const sheets = ['Лист1', 'Лист2'];
   state.actions.forEach((action, index) => {
@@ -601,8 +608,10 @@ function renderFormPreview() {
     empty.className = 'form-preview-empty';
     empty.textContent = state.dict.form_preview_empty || 'No manual fields required for these actions.';
     body.appendChild(empty);
+    logAll('renderFormPreview empty');
     return;
   }
+  logAll('renderFormPreview', { fields: fields.length });
   fields.forEach(field => {
     const wrap = document.createElement('div');
     wrap.className = 'form-preview-field';
@@ -634,10 +643,12 @@ function applyLocaleDict(dict, lang) {
   if (lang) {
     state.lang = pickLang(lang);
   }
+  logAll('applyLocaleDict', { lang: state.lang });
   applyTranslations();
 }
 
 async function loadLocale(lang) {
+  logAll('loadLocale start', { lang });
   const baseLang = pickLang(lang);
   const base = baseLang.toLowerCase();
   const candidates = [base, base.split('-')[0], 'en'];
@@ -650,25 +661,34 @@ async function loadLocale(lang) {
         state.dict = Object.assign({}, baseDict, dict);
         state.lang = c;
         applyTranslations();
+        logAll('loadLocale ok', { lang: c });
         return;
       }
+      logAll('loadLocale not ok', { lang: c, status: res.status });
     } catch (e) {
+      logAll('loadLocale error', { lang: c, error: String(e) });
       // ignore
     }
   }
+  logAll('loadLocale fallback', { lang: state.lang });
 }
 
 async function loadTemplates() {
   try {
+    logAll('loadTemplates start');
     const res = await fetch('data/templates.json');
     if (res.ok) {
       state.templates = await res.json();
+      logAll('loadTemplates ok', { count: state.templates.length });
       return;
     }
+    logAll('loadTemplates not ok', { status: res.status });
   } catch (e) {
+    logAll('loadTemplates error', { error: String(e) });
     // ignore
   }
   state.templates = [];
+  logAll('loadTemplates empty');
 }
 
 function renderTemplates() {
@@ -682,6 +702,7 @@ function renderTemplates() {
     const descr = (t.descr || '').toLowerCase();
     return !term || name.includes(term) || descr.includes(term);
   });
+  logAll('renderTemplates', { total: state.templates.length, visible: items.length, term });
 
   if (!items.length) {
     empty.hidden = false;
@@ -826,8 +847,10 @@ function sendToHost(cmd, data) {
       type: 'plugin',
       data: { 0: cmd, 1: data ? JSON.stringify(data) : '' }
     };
+    logAll('sendToHost', { cmd });
     window.parent.postMessage(JSON.stringify(payload), '*');
   } catch (e) {
+    logAll('sendToHost failed', { error: String(e) });
     // ignore
   }
 }
@@ -835,10 +858,11 @@ function sendToHost(cmd, data) {
 function postToParent(message) {
   try {
     if (window.parent && window.parent !== window) {
-      logDebug(`postToParent ${message && message.event ? message.event : 'message'}`);
+      logAll('postToParent', { event: message && message.event ? message.event : 'message' });
       window.parent.postMessage(JSON.stringify(message), '*');
     }
   } catch (e) {
+    logAll('postToParent failed', { error: String(e) });
     // ignore
   }
 }
@@ -884,18 +908,23 @@ function resolveTemplatePath(tpl) {
   const root = normalizePath(getReportsRoot());
   if (!root) return path.replace(/\//g, '\\');
   const full = `${root}/${path}`.replace(/\/+/g, '/');
-  return full.replace(/\//g, '\\');
+  const resolved = full.replace(/\//g, '\\');
+  logAll('resolveTemplatePath', { direct, resolved });
+  return resolved;
 }
 
 function resolveTemplateType(path) {
   try {
     const ext = (path || '').split('.').pop() || 'xlsx';
     if (window.parent && window.parent.utils && window.parent.utils.fileExtensionToFileFormat) {
-      return window.parent.utils.fileExtensionToFileFormat(ext);
+      const type = window.parent.utils.fileExtensionToFileFormat(ext);
+      logAll('resolveTemplateType', { ext, type });
+      return type;
     }
   } catch (e) {
     // ignore
   }
+  logAll('resolveTemplateType fallback', { path });
   return 0;
 }
 
@@ -916,12 +945,14 @@ function buildJob(template) {
     }
     return payload;
   });
-  return {
+  const job = {
     id: `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     templateId: template ? template.id : null,
     actions,
     debug: isDebugEnabled()
   };
+  logAll('buildJob', { jobId: job.id, actions: actions.length, templateId: job.templateId });
+  return job;
 }
 
 function isDebugEnabled() {
@@ -936,25 +967,43 @@ function isDebugEnabled() {
   }
 }
 
-function logDebug(message) {
-  if (!isDebugEnabled()) return;
+function isLogAllEnabled() {
+  try {
+    if (window.REPORTS_LOG_ALL === true) return true;
+    if (window.parent && window.parent.REPORTS_LOG_ALL === true) return true;
+    const stored = localStorage.getItem('reports.logAll');
+    if (!stored) return false;
+    return stored === '1' || stored.toLowerCase() === 'true';
+  } catch (e) {
+    return false;
+  }
+}
+
+function logAll(message, data) {
+  if (!isLogAllEnabled()) return;
   try {
     const stamp = new Date().toLocaleTimeString();
-    const entry = `[reports-ui ${stamp}] ${message}`;
-    console.log(entry);
+    const dataStr = (typeof data === 'undefined') ? '' : ' ' + JSON.stringify(data);
+    const entry = `[reports-ui ${stamp}] ${message}${dataStr}`;
+    if (window.console && console.log) console.log(entry);
     appendDebug(entry);
   } catch (e) {
     // ignore
   }
 }
 
+function logDebug(message, data) {
+  if (!isDebugEnabled()) return;
+  logAll(message, data);
+}
+
 function appendDebug(message) {
   try {
-    if (!isDebugEnabled()) return;
+    if (!isLogAllEnabled()) return;
     if (!message) return;
     state.debugLog.push(message);
-    if (state.debugLog.length > 300) {
-      state.debugLog = state.debugLog.slice(state.debugLog.length - 300);
+    if (state.debugLog.length > 2000) {
+      state.debugLog = state.debugLog.slice(state.debugLog.length - 2000);
     }
     const panel = document.getElementById('reports-debug-log');
     if (!panel) return;
@@ -966,7 +1015,7 @@ function appendDebug(message) {
 }
 
 function ensureDebugPanel() {
-  if (!isDebugEnabled()) return;
+  if (!isLogAllEnabled()) return;
   if (document.getElementById('reports-debug')) return;
   const panel = document.createElement('div');
   panel.id = 'reports-debug';
@@ -975,24 +1024,50 @@ function ensureDebugPanel() {
     <div class="reports-debug-header">
       <span>Reports debug</span>
       <div class="reports-debug-actions">
+        <button id="reports-debug-copy" class="btn btn-small btn-ghost">Copy</button>
         <button id="reports-debug-clear" class="btn btn-small btn-ghost">Clear</button>
       </div>
     </div>
     <pre id="reports-debug-log" class="reports-debug-log"></pre>
   `;
   document.body.appendChild(panel);
+  const copyBtn = document.getElementById('reports-debug-copy');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', async () => {
+      try {
+        const text = state.debugLog.join('\n');
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+        }
+        logAll('debug log copied', { lines: state.debugLog.length });
+      } catch (e) {
+        logAll('debug log copy failed', { error: String(e) });
+      }
+    });
+  }
   const clearBtn = document.getElementById('reports-debug-clear');
   if (clearBtn) {
     clearBtn.addEventListener('click', () => {
       state.debugLog = [];
       const panelLog = document.getElementById('reports-debug-log');
       if (panelLog) panelLog.textContent = '';
+      logAll('debug log cleared');
     });
   }
 }
 
 function syncParentDebugLog() {
-  if (!isDebugEnabled()) return;
+  if (!isLogAllEnabled()) return;
   try {
     const parentLog = window.parent && window.parent.__reportsLog;
     if (!parentLog || !Array.isArray(parentLog)) return;
@@ -1018,8 +1093,10 @@ function sendExternalJob(job) {
     });
     const script = `function(){try{var m=${JSON.stringify(message)};if(window.g_asc_plugins&&window.g_asc_plugins.runAllSystem){try{window.g_asc_plugins.runAllSystem();}catch(e){}}if(window.g_asc_plugins&&window.g_asc_plugins.sendToAllPlugins){window.g_asc_plugins.sendToAllPlugins(m);}else{window.postMessage(m,"*");}}catch(e){}}`;
     window.parent.AscDesktopEditor.CallInAllWindows(script);
+    logAll('sendExternalJob', { jobId: job && job.id ? job.id : '', hasActions: !!(job && job.actions && job.actions.length) });
     return true;
   } catch (e) {
+    logAll('sendExternalJob failed', { error: String(e) });
     return false;
   }
 }
@@ -1028,37 +1105,98 @@ function sendDirectJob(job, expectedName) {
   try {
     if (!window.parent || !window.parent.AscDesktopEditor) return false;
     const payload = JSON.stringify({ job, expectedName, debug: isDebugEnabled(), strictName: false });
-    const script = `function(){try{(function(){var p=${JSON.stringify(payload)};p=JSON.parse(p);var api=(window.Asc&&Asc.editor)?Asc.editor:window.Asc; if(!api||!api.asc_getDocumentName)return; var st=window.__reportsState||(window.__reportsState={}); st.job=p.job||{}; st.debug=!!p.debug; st.expected=p.expectedName||''; st.strict=!!p.strictName; st.startedAt=st.startedAt||Date.now(); function ready(){return !!(api.isLoadFullApi&&api.isDocumentLoadComplete);} function setRange(sheet,addr){var a=String(addr||'').trim();if(!a)return;var s=String(sheet||'').trim();var full=s? (s+'!'+a):a; api.asc_setWorksheetRange(full);} function runOnce(){if(!ready())return false; var name=api.asc_getDocumentName?api.asc_getDocumentName():''; if(st.strict&&st.expected&&name&&String(name).toLowerCase()!==String(st.expected).toLowerCase())return false; var job=st.job||{}; if(st.debug){try{setRange('', 'Z1'); api.asc_insertInCell('REPORTS DEBUG '+(job.id||''));}catch(e){}} function runAction(action){if(!action||!action.type)return; if(action.type==='setText'){var target=String(action.target||'').trim(); if(!target)return; setRange(action.sheet,target); api.asc_insertInCell(String(action.value||'')); if(action.merge){try{api.asc_mergeCells();}catch(e){}} } else if(action.type==='groupCols'){ if(!action.range)return; setRange(action.sheet, action.range); api.asc_group(false); if(typeof action.expanded==='boolean'){try{api.asc_changeGroupDetails(!!action.expanded);}catch(e){}} } else if(action.type==='deleteRow'){ if(!action.row)return; var row=String(action.row).trim(); if(!row)return; setRange(action.sheet, row+':'+row); api.asc_deleteCells(Asc.c_oAscDeleteOptions.DeleteRows); } } var acts=job.actions||[]; for(var i=0;i<acts.length;i++){runAction(acts[i]);} st.job=null; return true;} if(runOnce())return; if(!st.timer){st.timer=setInterval(function(){try{if(runOnce()){clearInterval(st.timer);st.timer=null;}else if(Date.now()-st.startedAt>60000){clearInterval(st.timer);st.timer=null;}}catch(e){}},500);} })();}catch(e){}}`;
+    const script = `function(){try{(function(){var p=${JSON.stringify(payload)};p=JSON.parse(p);var api=(window.Asc&&Asc.editor)?Asc.editor:window.Asc; var st=window.__reportsState||(window.__reportsState={}); st.job=p.job||{}; st.debug=!!p.debug; st.expected=p.expectedName||''; st.strict=!!p.strictName; st.startedAt=st.startedAt||Date.now(); st.lastLogAt=st.lastLogAt||0; function dbg(msg){try{var now=Date.now(); if(now-st.lastLogAt<2000)return; st.lastLogAt=now; if(window.AscDesktopEditor&&window.AscDesktopEditor.sendSystemMessage){window.AscDesktopEditor.sendSystemMessage({type:'reports:debug',data:{msg:msg,jobId:st.job&&st.job.id||''}});} }catch(e){}} function ready(){return !!(api&&api.isLoadFullApi&&api.isDocumentLoadComplete);} function setRange(sheet,addr){var a=String(addr||'').trim();if(!a)return;var s=String(sheet||'').trim();var full=s? (s+'!'+a):a; api.asc_setWorksheetRange(full);} function runOnce(){if(!api||!api.asc_getDocumentName){dbg('api not ready');return false;} if(!ready()){dbg('document not loaded');return false;} var name=api.asc_getDocumentName?api.asc_getDocumentName():''; if(st.strict&&st.expected&&name&&String(name).toLowerCase()!==String(st.expected).toLowerCase()){dbg('document name mismatch expected='+st.expected+' actual='+name);return false;} var job=st.job||{}; if(st.debug){try{setRange('', 'Z1'); api.asc_insertInCell('REPORTS DEBUG '+(job.id||''));}catch(e){dbg('debug insert failed '+e);}} function runAction(action){if(!action||!action.type)return; try{ if(action.type==='setText'){var target=String(action.target||'').trim(); if(!target){dbg('setText missing target');return;} setRange(action.sheet,target); api.asc_insertInCell(String(action.value||'')); if(action.merge){try{api.asc_mergeCells();}catch(e){dbg('merge failed '+e);}} } else if(action.type==='groupCols'){ if(!action.range){dbg('groupCols missing range');return;} setRange(action.sheet, action.range); api.asc_group(false); if(typeof action.expanded==='boolean'){try{api.asc_changeGroupDetails(!!action.expanded);}catch(e){dbg('group details failed '+e);}} } else if(action.type==='deleteRow'){ if(!action.row){dbg('deleteRow missing row');return;} var row=String(action.row).trim(); if(!row){dbg('deleteRow empty row');return;} setRange(action.sheet, row+':'+row); api.asc_deleteCells(Asc.c_oAscDeleteOptions.DeleteRows); } }catch(e){dbg('action error '+(action&&action.type||'')+' '+e);} } var acts=job.actions||[]; dbg('run actions count='+acts.length); for(var i=0;i<acts.length;i++){runAction(acts[i]);} st.job=null; dbg('run complete'); return true;} if(runOnce())return; if(!st.timer){st.timer=setInterval(function(){try{if(runOnce()){clearInterval(st.timer);st.timer=null;}else if(Date.now()-st.startedAt>60000){dbg('timeout');clearInterval(st.timer);st.timer=null;}}catch(e){dbg('timer error '+e);}},500);} })();}catch(e){try{if(window.AscDesktopEditor&&window.AscDesktopEditor.sendSystemMessage){window.AscDesktopEditor.sendSystemMessage({type:'reports:debug',data:{msg:'script error '+e,jobId:''}});} }catch(_e){}}}`;
     window.parent.AscDesktopEditor.CallInAllWindows(script);
+    logAll('sendDirectJob', { jobId: job && job.id ? job.id : '', expectedName: expectedName || '' });
     return true;
   } catch (e) {
+    logAll('sendDirectJob failed', { error: String(e) });
     return false;
   }
 }
 
-function runReport(template) {
-  const path = resolveTemplatePath(template);
-  if (!path) return;
-
-  const typeId = resolveTemplateType(path);
-  const job = buildJob(template);
-  logDebug(`runReport path=${path} typeId=${typeId} actions=${job.actions ? job.actions.length : 0}`);
-  postToParent({
-    event: 'reportsRun',
-    source: 'reports-ui',
-    data: {
-      path,
-      typeId,
-      job,
-      debug: isDebugEnabled()
+  function runReport(template) {
+    const path = resolveTemplatePath(template);
+    if (!path) {
+      logAll('runReport skipped: empty path', { templateId: template ? template.id : null });
+      return;
     }
-  });
-}
+
+    const typeId = resolveTemplateType(path);
+    const job = buildJob(template);
+    logAll('runReport', { path, typeId, jobId: job.id, actions: job.actions ? job.actions.length : 0 });
+
+    const hasParentSdk = !!(window.parent && window.parent.sdk && window.parent.sdk.command &&
+      window.parent.AscDesktopEditor && window.parent.AscDesktopEditor.CallInAllWindows);
+
+    if (hasParentSdk) {
+      try {
+        const payload = JSON.stringify({
+          template: {
+            id: template ? template.id : null,
+            type: typeId || 0,
+            path: path
+          }
+        });
+        window.parent.sdk.command('create:new', payload);
+        logAll('create:new via parent sdk', { jobId: job.id });
+      } catch (e) {
+        logAll('create:new via parent sdk failed', { error: String(e), jobId: job.id });
+      }
+
+      const start = Date.now();
+      let attempts = 0;
+      const tick = () => {
+        attempts += 1;
+        const ok = sendExternalJob(job);
+        logAll('sendExternalJob attempt', { jobId: job.id, attempt: attempts, ok: !!ok });
+        if (Date.now() - start > 60000) {
+          clearInterval(timer);
+          logAll('sendExternalJob stop', { jobId: job.id, attempts: attempts });
+        }
+      };
+      tick();
+      const timer = setInterval(tick, 1000);
+      return;
+    }
+
+    postToParent({
+      event: 'reportsRun',
+      source: 'reports-ui',
+      data: {
+        path,
+        typeId,
+        job,
+        debug: isDebugEnabled()
+      }
+    });
+
+    try {
+      if (state.pendingRunTimer) {
+        clearTimeout(state.pendingRunTimer);
+        state.pendingRunTimer = null;
+      }
+      state.pendingRun = { id: job.id, path, templateId: template ? template.id : null, typeId };
+      const expectedName = (path || '').split(/[/\\\\]/).pop();
+      state.pendingRunTimer = setTimeout(() => {
+        if (!state.pendingRun || state.pendingRun.id !== job.id) return;
+        logAll('reportsRun ack timeout, sending external job', { jobId: job.id });
+        const externalOk = sendExternalJob(job);
+        if (!externalOk) {
+          logAll('sendExternalJob failed, sending direct job', { jobId: job.id });
+          sendDirectJob(job, expectedName);
+        }
+      }, 1500);
+    } catch (e) {
+      logAll('reportsRun fallback setup failed', { error: String(e) });
+    }
+  }
 
 function openSettings() {
   const view = els.viewSettings();
   const reports = els.viewReports();
   if (view && reports) {
+    logAll('openSettings');
     reports.classList.add('hidden');
     view.classList.remove('hidden');
   }
@@ -1068,6 +1206,7 @@ function closeSettings() {
   const view = els.viewSettings();
   const reports = els.viewReports();
   if (view && reports) {
+    logAll('closeSettings');
     view.classList.add('hidden');
     reports.classList.remove('hidden');
   }
@@ -1140,8 +1279,12 @@ function syncThemeVars() {
 }
 
 function initEvents() {
-  els.search().addEventListener('input', () => renderTemplates());
+  els.search().addEventListener('input', () => {
+    logAll('search input', { value: els.search().value || '' });
+    renderTemplates();
+  });
   els.btnCreate().addEventListener('click', () => {
+    logAll('btnCreate click', { selectedId: state.selectedId });
     if (!state.selectedId) {
       openSettings();
       return;
@@ -1151,12 +1294,13 @@ function initEvents() {
       runReport(tpl);
     }
   });
-  els.btnSettings().addEventListener('click', openSettings);
-  els.btnBack().addEventListener('click', closeSettings);
-  els.btnClose().addEventListener('click', closeSettings);
+  els.btnSettings().addEventListener('click', () => { logAll('btnSettings click'); openSettings(); });
+  els.btnBack().addEventListener('click', () => { logAll('btnBack click'); closeSettings(); });
+  els.btnClose().addEventListener('click', () => { logAll('btnClose click'); closeSettings(); });
 
   els.navItems().forEach(item => {
     item.addEventListener('click', () => {
+      logAll('nav click', { section: item.dataset.section });
       setActiveSection(item.dataset.section);
     });
   });
@@ -1165,12 +1309,16 @@ function initEvents() {
   const fileInput = els.templateFileInput();
   const filePath = els.templateFilePath();
   if (fileBtn && fileInput && filePath) {
-    fileBtn.addEventListener('click', () => fileInput.click());
+    fileBtn.addEventListener('click', () => {
+      logAll('template file button click');
+      fileInput.click();
+    });
     fileInput.addEventListener('change', () => {
       const file = fileInput.files && fileInput.files[0];
       if (file) {
         filePath.value = file.name;
         localStorage.setItem('reports.templateFile', file.name);
+        logAll('template file selected', { name: file.name });
       }
     });
     const stored = localStorage.getItem('reports.templateFile');
@@ -1180,6 +1328,24 @@ function initEvents() {
   window.addEventListener('message', e => {
     try {
       const msg = JSON.parse(e.data);
+      logAll('message received', msg);
+      if (msg && msg.event === 'reportsRunAck' && msg.data) {
+        if (state.pendingRunTimer) {
+          clearTimeout(state.pendingRunTimer);
+          state.pendingRunTimer = null;
+        }
+        if (!state.pendingRun || (msg.data.jobId && state.pendingRun.id !== msg.data.jobId)) {
+          logAll('reportsRun ack ignored', msg.data);
+        } else {
+          logAll('reportsRun ack', msg.data);
+          state.pendingRun = null;
+        }
+        return;
+      }
+      if (msg && msg.event === 'reportsRunError' && msg.data) {
+        logAll('reportsRun error', msg.data);
+        return;
+      }
       if (msg && msg.event === 'uiLangChanged' && msg.data && msg.data.new) {
         loadLocale(msg.data.new);
       }
@@ -1196,6 +1362,18 @@ function initEvents() {
 }
 
 async function init() {
+  logAll('init start');
+  window.addEventListener('error', e => {
+    try {
+      logAll('window error', { message: e.message, source: e.filename, line: e.lineno, col: e.colno });
+    } catch (_) { /* ignore */ }
+  });
+  window.addEventListener('unhandledrejection', e => {
+    try {
+      const reason = e && e.reason ? (e.reason.message || String(e.reason)) : 'unknown';
+      logAll('unhandledrejection', { reason });
+    } catch (_) { /* ignore */ }
+  });
   try {
     const parentLang = window.parent && window.parent.utils && window.parent.utils.Lang;
     if (parentLang) {
@@ -1215,6 +1393,7 @@ async function init() {
   }
   const params = new URLSearchParams(window.location.search);
   const lang = pickLang(params.get('lang') || navigator.language || 'en');
+  logAll('init lang', { lang });
   await loadLocale(lang);
   await loadTemplates();
   syncThemeVars();
