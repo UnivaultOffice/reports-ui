@@ -1084,18 +1084,18 @@ function syncParentDebugLog() {
   }
 }
 
-function sendExternalJob(job) {
-  try {
-    if (!window.parent || !window.parent.AscDesktopEditor) return false;
-    const message = JSON.stringify({
-      type: 'onExternalPluginMessage',
-      data: { type: 'reports:run', job }
-    });
-    const script = `function(){try{var m=${JSON.stringify(message)};if(window.g_asc_plugins&&window.g_asc_plugins.runAllSystem){try{window.g_asc_plugins.runAllSystem();}catch(e){}}if(window.g_asc_plugins&&window.g_asc_plugins.sendToAllPlugins){window.g_asc_plugins.sendToAllPlugins(m);}else{window.postMessage(m,"*");}}catch(e){}}`;
-    window.parent.AscDesktopEditor.CallInAllWindows(script);
-    logAll('sendExternalJob', { jobId: job && job.id ? job.id : '', hasActions: !!(job && job.actions && job.actions.length) });
-    return true;
-  } catch (e) {
+  function sendExternalJob(job) {
+    try {
+      if (!window.parent || !window.parent.AscDesktopEditor) return false;
+      const message = JSON.stringify({
+        type: 'onExternalPluginMessage',
+        data: { type: 'reports:run', job }
+      });
+      const script = `function(){try{var m=${JSON.stringify(message)};if(window.g_asc_plugins&&window.g_asc_plugins.runAllSystem){try{window.g_asc_plugins.runAllSystem();}catch(e){}}if(window.g_asc_plugins&&window.g_asc_plugins.sendToAllPlugins){window.g_asc_plugins.sendToAllPlugins(m);}try{window.postMessage(m,"*");}catch(e){}}catch(e){}}`;
+      window.parent.AscDesktopEditor.CallInAllWindows(script);
+      logAll('sendExternalJob', { jobId: job && job.id ? job.id : '', hasActions: !!(job && job.actions && job.actions.length) });
+      return true;
+    } catch (e) {
     logAll('sendExternalJob failed', { error: String(e) });
     return false;
   }
