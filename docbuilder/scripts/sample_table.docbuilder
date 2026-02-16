@@ -1,0 +1,32 @@
+builder.CreateFile("xlsx");
+
+var outputPath = "generated_sample.xlsx";
+var reportTitle = "Report";
+if (typeof Argument !== "undefined") {
+    if (Argument && Argument.output)
+        outputPath = String(Argument.output);
+    if (Argument && Argument.title)
+        reportTitle = String(Argument.title);
+}
+
+var sheet = Api.GetActiveSheet();
+sheet.SetName("Data");
+
+sheet.GetRange("A1").SetValue(reportTitle);
+sheet.GetRange("A2").SetValue("Index");
+sheet.GetRange("B2").SetValue("Category");
+sheet.GetRange("C2").SetValue("Amount");
+sheet.GetRange("D2").SetValue("Date");
+sheet.GetRange("E2").SetValue("Status");
+
+for (var row = 3; row <= 302; row += 1) {
+    var idx = row - 2;
+    sheet.GetRange("A" + row).SetValue(idx);
+    sheet.GetRange("B" + row).SetValue("Group " + ((idx % 10) + 1));
+    sheet.GetRange("C" + row).SetValue(idx * 125);
+    sheet.GetRange("D" + row).SetValue("2026-02-16");
+    sheet.GetRange("E" + row).SetValue((idx % 2) ? "Open" : "Closed");
+}
+
+builder.SaveFile("xlsx", "jsValue(outputPath)");
+builder.CloseFile();

@@ -1,0 +1,509 @@
+var input = (typeof Argument !== "undefined" && Argument) ? Argument : {};
+var templatePath = input.templatePath ? String(input.templatePath) : "";
+var outputPath = input.outputPath ? String(input.outputPath) : "";
+var actions = (input.actions && typeof input.actions.length === "number") ? input.actions : [];
+var stopOnError = (typeof input.stopOnError === "boolean") ? input.stopOnError : true;
+
+if (!templatePath)
+    throw new Error("templatePath is required");
+if (!outputPath)
+    throw new Error("outputPath is required");
+
+function toInt(value, fallback) {
+    var n = parseInt(value, 10);
+    return isNaN(n) ? fallback : n;
+}
+
+function toBool(value, fallback) {
+    if (typeof value === "boolean")
+        return value;
+    if (typeof value === "number")
+        return value !== 0;
+    if (typeof value === "string") {
+        var s = value.toLowerCase();
+        if (s === "true" || s === "1" || s === "yes")
+            return true;
+        if (s === "false" || s === "0" || s === "no")
+            return false;
+    }
+    return fallback;
+}
+
+function colToNumber(col) {
+    var s = String(col || "A").toUpperCase().replace(/[^A-Z]/g, "");
+    if (!s)
+        return 1;
+    var n = 0;
+    for (var i = 0; i < s.length; i += 1)
+        n = n * 26 + (s.charCodeAt(i) - 64);
+    return n;
+}
+
+function numberToCol(n) {
+    var value = Math.max(1, toInt(n, 1));
+    var out = "";
+    while (value > 0) {
+        var m = (value - 1) % 26;
+        out = String.fromCharCode(65 + m) + out;
+        value = Math.floor((value - m - 1) / 26);
+    }
+    return out;
+}
+
+function rowSpan(startRow, count) {
+    var start = Math.max(1, toInt(startRow, 1));
+    var cnt = Math.max(1, toInt(count, 1));
+    var end = start + cnt - 1;
+    return String(start) + ":" + String(end);
+}
+
+function colSpan(startCol, count) {
+    var startN = colToNumber(startCol);
+    var cnt = Math.max(1, toInt(count, 1));
+    var endN = startN + cnt - 1;
+    return numberToCol(startN) + ":" + numberToCol(endN);
+}
+
+function sheetByRef(ref) {
+    if (ref === undefined || ref === null || ref === "")
+        return Api.GetActiveSheet();
+    var val = ref;
+    if (typeof ref === "string") {
+        var t = ref.trim();
+        if (/^\d+$/.test(t))
+            val = parseInt(t, 10);
+        else
+            val = t;
+    }
+    var sheet = Api.GetSheet(val);
+    return sheet ? sheet : Api.GetActiveSheet();
+}
+
+function rangeOn(sheet, addr) {
+    return sheet.GetRange(String(addr || "A1"));
+}
+
+function colorFromHex(hex) {
+    var s = String(hex || "#000000").trim().replace("#", "");
+    if (s.length === 3)
+        s = s.charAt(0) + s.charAt(0) + s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2);
+    if (!/^[0-9a-fA-F]{6}$/.test(s))
+        s = "000000";
+    var r = parseInt(s.substr(0, 2), 16);
+    var g = parseInt(s.substr(2, 2), 16);
+    var b = parseInt(s.substr(4, 2), 16);
+    return Api.CreateColorFromRGB(r, g, b);
+}
+
+function applyBorders(rng, scope, style, hex) {
+    var parts;
+    if (scope === "outer")
+        parts = ["Top", "Bottom", "Left", "Right"];
+    else if (scope === "inner")
+        parts = ["InsideHorizontal", "InsideVertical"];
+    else
+        parts = ["Top", "Bottom", "Left", "Right", "InsideHorizontal", "InsideVertical"];
+    var color = colorFromHex(hex || "#000000");
+    var line = style || "Thin";
+    for (var i = 0; i < parts.length; i += 1)
+        rng.SetBorders(parts[i], line, color);
+}
+
+function toNumber(value, fallback) {
+    var n = Number(value);
+    return isNaN(n) ? fallback : n;
+}
+
+function isNoFill(value) {
+    var s = String(value === undefined || value === null ? "" : value).trim().toLowerCase().replace(/\s+/g, "");
+    return s === "" || s === "none" || s === "nofill";
+}
+
+function normalizeUnderline(value) {
+    var s = String(value === undefined || value === null ? "none" : value).trim().toLowerCase();
+    if (s === "single")
+        return "single";
+    if (s === "singleaccounting")
+        return "singleAccounting";
+    if (s === "double")
+        return "double";
+    if (s === "doubleaccounting")
+        return "doubleAccounting";
+    return "none";
+}
+
+function normalizeOrientation(value) {
+    if (value === undefined || value === null)
+        return null;
+    if (typeof value === "number")
+        return value;
+    var s = String(value).trim();
+    if (!s)
+        return null;
+    var l = s.toLowerCase();
+    if (l === "xldownward")
+        return "xlDownward";
+    if (l === "xlhorizontal")
+        return "xlHorizontal";
+    if (l === "xlupward")
+        return "xlUpward";
+    if (l === "xlvertical")
+        return "xlVertical";
+    var n = Number(s);
+    return isNaN(n) ? s : n;
+}
+
+function sortOrder(value) {
+    var s = String(value || "asc").trim().toLowerCase();
+    return s === "desc" ? "xlDescending" : "xlAscending";
+}
+
+function sortKeyRange(sheet, value) {
+    var s = String(value || "").trim();
+    if (!s)
+        return null;
+    return rangeOn(sheet, s);
+}
+
+function criteriaValue(value, operator) {
+    if (value === undefined || value === null)
+        return undefined;
+    if (Array.isArray(value))
+        return value;
+    var text = String(value).trim();
+    if (!text)
+        return undefined;
+    if (operator === "xlFilterCellColor" || operator === "xlFilterFontColor")
+        return colorFromHex(text);
+    if (operator === "xlFilterValues") {
+        var raw = text.split(/[;\n,]+/);
+        var list = [];
+        for (var i = 0; i < raw.length; i += 1) {
+            var item = String(raw[i] || "").trim();
+            if (item)
+                list.push(item);
+        }
+        return list.length ? list : undefined;
+    }
+    return text;
+}
+
+function groupSelection(sheet, rangeAddr, isRows, collapsed) {
+    if (!(typeof Asc !== "undefined" && Asc && Asc.editor && typeof Asc.editor.asc_group === "function"))
+        return false;
+    sheet.SetActive();
+    var rg = rangeOn(sheet, rangeAddr);
+    rg.Select();
+    Asc.editor.asc_group(!!isRows);
+    if (toBool(collapsed, false) && typeof Asc.editor.asc_changeGroupDetails === "function") {
+        rg.Select();
+        Asc.editor.asc_changeGroupDetails(false);
+    }
+    return true;
+}
+
+function executeAction(action) {
+    var type = String(action.type || "");
+    if (!type)
+        return;
+
+    if (type === "set_cell_value") {
+        var sh = sheetByRef(action.sheet);
+        var rng = rangeOn(sh, action.range || "A1");
+        var mode = String(action.mode || "text").toLowerCase();
+        var value = action.value;
+        if (mode === "number") {
+            var num = Number(value);
+            value = isNaN(num) ? 0 : num;
+        } else if (mode === "bool") {
+            value = toBool(value, false);
+        } else if (mode === "formula") {
+            value = String(value || "");
+            if (value && value.charAt(0) !== "=")
+                value = "=" + value;
+        } else {
+            value = (value === undefined || value === null) ? "" : String(value);
+        }
+        rng.SetValue(value);
+        if (toBool(action.merge, false))
+            rng.Merge(false);
+        return;
+    }
+
+    if (type === "clear_range") {
+        var shClear = sheetByRef(action.sheet);
+        var rgClear = rangeOn(shClear, action.range || "A1");
+        var clearMode = String(action.mode || "contents");
+        if (clearMode === "formats")
+            rgClear.ClearFormats();
+        else if (clearMode === "hyperlinks")
+            rgClear.ClearHyperlinks();
+        else if (clearMode === "all")
+            rgClear.Clear();
+        else
+            rgClear.ClearContents();
+        return;
+    }
+
+    if (type === "formula_to_value") {
+        var shFormula = sheetByRef(action.sheet);
+        var rgFormula = rangeOn(shFormula, action.range || "A1");
+        rgFormula.ForEach(function (cell) {
+            var f = cell.GetFormula();
+            if (f && String(f).trim() !== "") {
+                var v = cell.GetValue();
+                cell.SetValue(v);
+            }
+        });
+        return;
+    }
+
+    if (type === "set_border") {
+        var shBorder = sheetByRef(action.sheet);
+        var rgBorder = rangeOn(shBorder, action.range || "A1");
+        applyBorders(rgBorder, String(action.scope || "all"), String(action.style || "Thin"), action.color || "#000000");
+        return;
+    }
+
+    if (type === "set_font_style") {
+        var shFont = sheetByRef(action.sheet);
+        var rgFont = rangeOn(shFont, action.range || "A1");
+        var fontName = String(action.font_name || "").trim();
+        var fontSize = toNumber(action.font_size, NaN);
+        if (fontName)
+            rgFont.SetFontName(fontName);
+        if (!isNaN(fontSize) && fontSize > 0)
+            rgFont.SetFontSize(fontSize);
+        rgFont.SetBold(toBool(action.bold, false));
+        rgFont.SetItalic(toBool(action.italic, false));
+        rgFont.SetUnderline(normalizeUnderline(action.underline));
+        rgFont.SetStrikeout(toBool(action.strikeout, false));
+        if (!(action.font_color === undefined || action.font_color === null || String(action.font_color).trim() === ""))
+            rgFont.SetFontColor(colorFromHex(action.font_color));
+        return;
+    }
+
+    if (type === "set_fill_color") {
+        var shFill = sheetByRef(action.sheet);
+        var rgFill = rangeOn(shFill, action.range || "A1");
+        if (isNoFill(action.color))
+            rgFill.SetFillColor("No Fill");
+        else
+            rgFill.SetFillColor(colorFromHex(action.color));
+        return;
+    }
+
+    if (type === "set_number_format") {
+        var shFmt = sheetByRef(action.sheet);
+        var rgFmt = rangeOn(shFmt, action.range || "A1");
+        var fmt = String(action.format || "General");
+        rgFmt.SetNumberFormat(fmt);
+        return;
+    }
+
+    if (type === "set_alignment") {
+        var shAlign = sheetByRef(action.sheet);
+        var rgAlign = rangeOn(shAlign, action.range || "A1");
+        var h = String(action.horizontal || "").trim().toLowerCase();
+        var v = String(action.vertical || "").trim().toLowerCase();
+        var ro = String(action.reading_order || "").trim().toLowerCase();
+        var ori = normalizeOrientation(action.orientation);
+        if (h)
+            rgAlign.SetAlignHorizontal(h);
+        if (v)
+            rgAlign.SetAlignVertical(v);
+        rgAlign.SetWrap(toBool(action.wrap, false));
+        if (ori !== null)
+            rgAlign.SetOrientation(ori);
+        if (ro === "context" || ro === "ltr" || ro === "rtl")
+            rgAlign.SetReadingOrder(ro);
+        return;
+    }
+
+    if (type === "merge_range") {
+        var shMerge = sheetByRef(action.sheet);
+        rangeOn(shMerge, action.range || "A1").Merge(toBool(action.across, false));
+        return;
+    }
+
+    if (type === "unmerge_range") {
+        var shUnmerge = sheetByRef(action.sheet);
+        rangeOn(shUnmerge, action.range || "A1").UnMerge();
+        return;
+    }
+
+    if (type === "insert_rows") {
+        var shInsRows = sheetByRef(action.sheet);
+        rangeOn(shInsRows, rowSpan(action.start_row, action.count)).Insert("down");
+        return;
+    }
+
+    if (type === "delete_rows") {
+        var shDelRows = sheetByRef(action.sheet);
+        rangeOn(shDelRows, rowSpan(action.start_row, action.count)).Delete("up");
+        return;
+    }
+
+    if (type === "set_rows_hidden") {
+        var shRows = sheetByRef(action.sheet);
+        var r1 = Math.max(1, toInt(action.start_row, 1));
+        var r2 = Math.max(r1, toInt(action.end_row, r1));
+        rangeOn(shRows, String(r1) + ":" + String(r2)).SetHidden(toBool(action.hidden, true));
+        return;
+    }
+
+    if (type === "insert_columns") {
+        var shInsCols = sheetByRef(action.sheet);
+        rangeOn(shInsCols, colSpan(action.start_column, action.count)).Insert("right");
+        return;
+    }
+
+    if (type === "delete_columns") {
+        var shDelCols = sheetByRef(action.sheet);
+        rangeOn(shDelCols, colSpan(action.start_column, action.count)).Delete("left");
+        return;
+    }
+
+    if (type === "set_columns_hidden") {
+        var shCols = sheetByRef(action.sheet);
+        var c1 = numberToCol(colToNumber(action.start_column));
+        var c2 = numberToCol(Math.max(colToNumber(action.start_column), colToNumber(action.end_column)));
+        rangeOn(shCols, c1 + ":" + c2).SetHidden(toBool(action.hidden, true));
+        return;
+    }
+
+    if (type === "group_rows") {
+        var shGroupRows = sheetByRef(action.sheet);
+        var gr1 = Math.max(1, toInt(action.start_row, 1));
+        var gr2 = Math.max(gr1, toInt(action.end_row, gr1));
+        var rowsRange = String(gr1) + ":" + String(gr2);
+        if (!groupSelection(shGroupRows, rowsRange, true, action.collapsed))
+            rangeOn(shGroupRows, rowsRange).SetHidden(toBool(action.collapsed, false));
+        return;
+    }
+
+    if (type === "group_columns") {
+        var shGroupCols = sheetByRef(action.sheet);
+        var gc1 = numberToCol(colToNumber(action.start_column));
+        var gc2 = numberToCol(Math.max(colToNumber(action.start_column), colToNumber(action.end_column)));
+        var colsRange = gc1 + ":" + gc2;
+        if (!groupSelection(shGroupCols, colsRange, false, action.collapsed))
+            rangeOn(shGroupCols, colsRange).SetHidden(toBool(action.collapsed, false));
+        return;
+    }
+
+    if (type === "autofit") {
+        var shAutofit = sheetByRef(action.sheet);
+        rangeOn(shAutofit, action.range || "A:Z").AutoFit(toBool(action.rows, true), toBool(action.cols, true));
+        return;
+    }
+
+    if (type === "set_row_height") {
+        var shRowH = sheetByRef(action.sheet);
+        var rgRowH = rangeOn(shRowH, action.range || "1:1");
+        var rowH = toNumber(action.height, NaN);
+        if (!isNaN(rowH) && rowH > 0)
+            rgRowH.SetRowHeight(rowH);
+        return;
+    }
+
+    if (type === "set_column_width") {
+        var shColW = sheetByRef(action.sheet);
+        var rgColW = rangeOn(shColW, action.range || "A:A");
+        var colW = toNumber(action.width, NaN);
+        if (!isNaN(colW) && colW > 0)
+            rgColW.SetColumnWidth(colW);
+        return;
+    }
+
+    if (type === "copy_paste_range") {
+        var shFrom = sheetByRef(action.from_sheet);
+        var shTo = sheetByRef(action.to_sheet === undefined || action.to_sheet === null || action.to_sheet === "" ? action.from_sheet : action.to_sheet);
+        var rgFrom = rangeOn(shFrom, action.from_range || "A1");
+        var rgTo = rangeOn(shTo, action.to_cell || "A1");
+        var pasteType = String(action.paste_type || "xlPasteAll");
+        var operation = String(action.operation || "xlPasteSpecialOperationNone");
+        rgFrom.Copy();
+        rgTo.PasteSpecial(pasteType, operation, toBool(action.skip_blanks, false), toBool(action.transpose, false));
+        return;
+    }
+
+    if (type === "sort_range") {
+        var shSort = sheetByRef(action.sheet);
+        var rgSort = rangeOn(shSort, action.range || "A1");
+        var key1 = sortKeyRange(shSort, action.key1);
+        if (!key1)
+            return;
+        var key2 = sortKeyRange(shSort, action.key2);
+        var key3 = sortKeyRange(shSort, action.key3);
+        var sortOrientation = String(action.sort_by || "rows").toLowerCase() === "columns" ? "xlSortColumns" : "xlSortRows";
+        var header = toBool(action.header, true) ? "xlYes" : "xlNo";
+        rgSort.SetSort(key1, sortOrder(action.order1), key2, sortOrder(action.order2), key3, sortOrder(action.order3), header, sortOrientation);
+        return;
+    }
+
+    if (type === "set_autofilter") {
+        var shFilter = sheetByRef(action.sheet);
+        var rgFilter = rangeOn(shFilter, action.range || "A1");
+        var rawField = action.field;
+        var hasField = !(rawField === undefined || rawField === null || String(rawField).trim() === "");
+        if (!hasField) {
+            rgFilter.SetAutoFilter();
+            return;
+        }
+        var field = Math.max(1, toInt(rawField, 1));
+        var opRaw = String(action.operator || "").trim();
+        var op = opRaw ? opRaw : undefined;
+        var c1 = criteriaValue(action.criteria1, opRaw);
+        var c2 = (action.criteria2 === undefined || action.criteria2 === null || String(action.criteria2).trim() === "") ? undefined : String(action.criteria2).trim();
+        rgFilter.SetAutoFilter(field, c1, op, c2, toBool(action.visible_drop_down, true));
+        return;
+    }
+
+    if (type === "set_array_formula") {
+        var shArr = sheetByRef(action.sheet);
+        var rgArr = rangeOn(shArr, action.range || "A1");
+        var formula = String(action.formula || "").trim();
+        if (!formula)
+            return;
+        if (formula.charAt(0) !== "=")
+            formula = "=" + formula;
+        rgArr.SetFormulaArray(formula);
+        return;
+    }
+
+    if (type === "set_gridlines") {
+        var shGrid = sheetByRef(action.sheet);
+        shGrid.SetDisplayGridlines(toBool(action.show, true));
+        return;
+    }
+
+    if (type === "add_sheet") {
+        Api.AddSheet(String(action.sheet_name || "НовыйЛист"));
+        return;
+    }
+
+    if (type === "rename_sheet") {
+        var shRename = sheetByRef(action.sheet);
+        shRename.SetName(String(action.new_name || "Лист"));
+        return;
+    }
+
+    if (type === "delete_sheet") {
+        var shDelete = sheetByRef(action.sheet);
+        shDelete.Delete();
+        return;
+    }
+}
+
+builder.OpenFile("jsValue(templatePath)", "");
+for (var i = 0; i < actions.length; i += 1) {
+    try {
+        executeAction(actions[i]);
+    } catch (e) {
+        if (stopOnError)
+            throw e;
+    }
+}
+builder.SaveFile("xlsx", "jsValue(outputPath)");
+builder.CloseFile();

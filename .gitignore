@@ -1,0 +1,3 @@
+docbuilder/bin/
+docbuilder/scripts/_tmp_*
+docbuilder/scripts/*.xlsx
