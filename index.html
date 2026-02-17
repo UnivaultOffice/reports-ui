@@ -54,7 +54,7 @@
               <input id="scenario-template" type="text" placeholder="Путь к .xlsx шаблону" />
               <button id="btn-pick-template" class="btn btn-secondary" type="button">Выбрать</button>
             </div>
-            <small id="template-help" class="field-help">Можно выбрать абсолютный путь или файл из reports-ui/templates.</small>
+            <small id="template-help" class="field-help">Можно выбрать любой .xlsx: при сохранении сценария шаблон копируется в reports-ui/templates и переименовывается по названию сценария.</small>
             <input id="template-file-input" type="file" accept=".xlsx,.xlsm,.xls" hidden />
           </label>
           <label class="field field-full">
@@ -62,6 +62,15 @@
             <textarea id="scenario-description" rows="2" placeholder="Кратко: что делает сценарий"></textarea>
           </label>
         </div>
+      </section>
+
+      <section class="modal-section">
+        <div class="section-head">
+          <h3>Поля ввода перед запуском</h3>
+          <button id="btn-add-input-field" class="btn btn-secondary" type="button">Добавить поле</button>
+        </div>
+        <p class="section-note">Если поля добавлены, перед запуском откроется форма ввода значений.</p>
+        <div id="input-field-list" class="input-field-list"></div>
       </section>
 
       <section class="modal-section">
@@ -80,8 +89,27 @@
     </div>
   </div>
 
+  <div id="run-input-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card modal-card-compact">
+      <header class="modal-header">
+        <div>
+          <h2 id="run-input-title">Заполнение отчета</h2>
+          <p class="modal-subtitle">Введите значения полей для генерации файла</p>
+        </div>
+        <button id="btn-run-input-cancel" class="btn btn-ghost" type="button">Отмена</button>
+      </header>
+      <section class="modal-section">
+        <div id="run-input-fields" class="run-input-fields"></div>
+      </section>
+      <footer class="modal-footer">
+        <button id="btn-run-input-submit" class="btn btn-primary" type="button">Сгенерировать</button>
+      </footer>
+    </div>
+  </div>
+
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=20260216-16"></script>
+  <script src="app.js?v=20260217-09"></script>
 </body>
 </html>

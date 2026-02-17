@@ -79,8 +79,27 @@ function sheetByRef(ref) {
     return sheet ? sheet : Api.GetActiveSheet();
 }
 
-function rangeOn(sheet, addr) {
-    return sheet.GetRange(String(addr || "A1"));
+function rangeOn(sheet, addr, preferNamed) {
+    var ref = String(addr || "A1").trim();
+    var maybeNamed = toBool(preferNamed, false) || /^[A-Za-z_][A-Za-z0-9_.]*$/.test(ref);
+    if (maybeNamed && typeof Api.GetRange === "function") {
+        try {
+            var named = Api.GetRange(ref);
+            if (named)
+                return named;
+        } catch (eNamed) {}
+    }
+    try {
+        return sheet.GetRange(ref || "A1");
+    } catch (eSheetRange) {}
+    if (typeof Api.GetRange === "function") {
+        try {
+            var any = Api.GetRange(ref || "A1");
+            if (any)
+                return any;
+        } catch (eAny) {}
+    }
+    return sheet.GetRange("A1");
 }
 
 function colorFromHex(hex) {
@@ -101,6 +120,18 @@ function applyBorders(rng, scope, style, hex) {
         parts = ["Top", "Bottom", "Left", "Right"];
     else if (scope === "inner")
         parts = ["InsideHorizontal", "InsideVertical"];
+    else if (scope === "top")
+        parts = ["Top"];
+    else if (scope === "bottom")
+        parts = ["Bottom"];
+    else if (scope === "left")
+        parts = ["Left"];
+    else if (scope === "right")
+        parts = ["Right"];
+    else if (scope === "inside_h")
+        parts = ["InsideHorizontal"];
+    else if (scope === "inside_v")
+        parts = ["InsideVertical"];
     else
         parts = ["Top", "Bottom", "Left", "Right", "InsideHorizontal", "InsideVertical"];
     var color = colorFromHex(hex || "#000000");
@@ -153,6 +184,82 @@ function normalizeOrientation(value) {
     return isNaN(n) ? s : n;
 }
 
+function clampInt(value, min, max, fallback) {
+    var n = parseInt(value, 10);
+    if (isNaN(n))
+        n = fallback;
+    if (n < min)
+        n = min;
+    if (n > max)
+        n = max;
+    return n;
+}
+
+function repeatChar(ch, count) {
+    var out = "";
+    for (var i = 0; i < count; i += 1)
+        out += ch;
+    return out;
+}
+
+function decimalsMask(value) {
+    var decimals = clampInt(value, 0, 15, 2);
+    return decimals > 0 ? "." + repeatChar("0", decimals) : "";
+}
+
+function normalizeCurrencySymbol(value) {
+    var s = String(value === undefined || value === null ? "" : value).trim();
+    return s ? s : "₽";
+}
+
+function buildNumberFormat(action) {
+    var preset = String(action.format_preset || "").trim().toLowerCase();
+    if (!preset) {
+        var f0 = String(action.format || "").trim();
+        return f0 ? f0 : "General";
+    }
+    var decimals = clampInt(action.decimals, 0, 15, 2);
+    var grouped = toBool(action.use_thousands, false);
+    var base = (grouped ? "#,##0" : "0") + decimalsMask(decimals);
+    var symbol = normalizeCurrencySymbol(action.currency_symbol);
+    var red = toBool(action.negative_red, false);
+
+    if (preset === "general")
+        return "General";
+    if (preset === "number")
+        return red ? base + ";[Red]-" + base : base;
+    if (preset === "scientific") {
+        var sci = "0" + decimalsMask(decimals) + "E+00";
+        return red ? sci + ";[Red]-" + sci : sci;
+    }
+    if (preset === "financial") {
+        var fin = symbol + " " + base;
+        return red ? fin + ";[Red]-" + fin : fin + ";-" + fin;
+    }
+    if (preset === "currency") {
+        var cur = symbol + base;
+        return red ? cur + ";[Red]-" + cur : cur + ";-" + cur;
+    }
+    if (preset === "short_date")
+        return "dd.mm.yyyy";
+    if (preset === "long_date")
+        return "[$-419]dd mmmm yyyy г.";
+    if (preset === "time")
+        return "hh:mm:ss";
+    if (preset === "percent")
+        return "0" + decimalsMask(decimals) + "%";
+    if (preset === "fraction")
+        return "# ?/?";
+    if (preset === "text")
+        return "@";
+    if (preset === "custom") {
+        var custom = String(action.custom_format || action.format || "").trim();
+        return custom ? custom : "General";
+    }
+    var fallback = String(action.format || "").trim();
+    return fallback ? fallback : "General";
+}
+
 function sortOrder(value) {
     var s = String(value || "asc").trim().toLowerCase();
     return s === "desc" ? "xlDescending" : "xlAscending";
@@ -188,6 +295,63 @@ function criteriaValue(value, operator) {
     return text;
 }
 
+function sheetList(value) {
+    if (Array.isArray(value)) {
+        var out = [];
+        for (var i = 0; i < value.length; i += 1) {
+            var item = String(value[i] === undefined || value[i] === null ? "" : value[i]).trim();
+            if (item)
+                out.push(item);
+        }
+        return out;
+    }
+    var src = String(value === undefined || value === null ? "" : value).trim();
+    if (!src)
+        return [];
+    var parts = src.split(/[;,\n]+/);
+    var names = [];
+    for (var j = 0; j < parts.length; j += 1) {
+        var name = String(parts[j] || "").trim();
+        if (name)
+            names.push(name);
+    }
+    return names;
+}
+
+function sheetsForScope(scope, namesRaw) {
+    var mode = String(scope === undefined || scope === null ? "workbook" : scope).trim().toLowerCase();
+    if (mode === "sheets") {
+        var names = sheetList(namesRaw);
+        var selected = [];
+        for (var i = 0; i < names.length; i += 1) {
+            var sheet = Api.GetSheet(names[i]);
+            if (sheet)
+                selected.push(sheet);
+        }
+        if (selected.length)
+            return selected;
+    }
+    var all = Api.GetSheets();
+    if (all && typeof all.length === "number" && all.length)
+        return all;
+    return [Api.GetActiveSheet()];
+}
+
+function replaceTokenOnSheet(sheet, token, value) {
+    var used = sheet.GetUsedRange();
+    if (!used)
+        return;
+    used.Replace({
+        What: token,
+        Replacement: value,
+        LookAt: "xlPart",
+        SearchOrder: "xlByRows",
+        SearchDirection: "xlNext",
+        MatchCase: false,
+        ReplaceAll: true
+    });
+}
+
 function groupSelection(sheet, rangeAddr, isRows, collapsed) {
     if (!(typeof Asc !== "undefined" && Asc && Asc.editor && typeof Asc.editor.asc_group === "function"))
         return false;
@@ -209,7 +373,7 @@ function executeAction(action) {
 
     if (type === "set_cell_value") {
         var sh = sheetByRef(action.sheet);
-        var rng = rangeOn(sh, action.range || "A1");
+        var rng = rangeOn(sh, action.range || "A1", action.named_range);
         var mode = String(action.mode || "text").toLowerCase();
         var value = action.value;
         if (mode === "number") {
@@ -227,6 +391,50 @@ function executeAction(action) {
         rng.SetValue(value);
         if (toBool(action.merge, false))
             rng.Merge(false);
+        var hasKeepFlag = !(action.keep_template_format === undefined || action.keep_template_format === null || String(action.keep_template_format).trim() === "");
+        var hasLegacyApply = !(action.apply_style === undefined || action.apply_style === null);
+        var legacyApply = toBool(action.apply_style, false);
+        var applyAlignment = toBool(action.apply_alignment, hasLegacyApply ? legacyApply : false);
+        var applyNumberFormat = toBool(action.apply_number_format, false);
+        var applyFont = toBool(action.apply_font, false);
+        var applyFill = toBool(action.apply_fill, false);
+        var keepTemplate = hasKeepFlag ? toBool(action.keep_template_format, true) : !(applyAlignment || applyNumberFormat || applyFont || applyFill || legacyApply);
+        if (keepTemplate)
+            return;
+        if (applyAlignment) {
+            var insH = String(action.horizontal || "").trim().toLowerCase();
+            var insV = String(action.vertical || "").trim().toLowerCase();
+            if (insH)
+                rng.SetAlignHorizontal(insH);
+            if (insV)
+                rng.SetAlignVertical(insV);
+            rng.SetWrap(toBool(action.wrap, false));
+        }
+        if (applyNumberFormat) {
+            var insFmt = buildNumberFormat(action);
+            rng.SetNumberFormat(insFmt);
+        }
+        if (applyFont) {
+            var insFontName = String(action.font_name || "").trim();
+            var insFontSize = toNumber(action.font_size, NaN);
+            if (insFontName)
+                rng.SetFontName(insFontName);
+            if (!isNaN(insFontSize) && insFontSize > 0)
+                rng.SetFontSize(insFontSize);
+            rng.SetBold(toBool(action.bold, false));
+            rng.SetItalic(toBool(action.italic, false));
+            rng.SetUnderline(normalizeUnderline(action.underline));
+            rng.SetStrikeout(toBool(action.strikeout, false));
+            var insFontColorRaw = String(action.font_color === undefined || action.font_color === null ? "" : action.font_color).trim().toLowerCase();
+            if (insFontColorRaw && insFontColorRaw !== "auto")
+                rng.SetFontColor(colorFromHex(action.font_color));
+        }
+        if (applyFill) {
+            if (isNoFill(action.fill_color))
+                rng.SetFillColor("No Fill");
+            else
+                rng.SetFillColor(colorFromHex(action.fill_color));
+        }
         return;
     }
 
@@ -278,7 +486,8 @@ function executeAction(action) {
         rgFont.SetItalic(toBool(action.italic, false));
         rgFont.SetUnderline(normalizeUnderline(action.underline));
         rgFont.SetStrikeout(toBool(action.strikeout, false));
-        if (!(action.font_color === undefined || action.font_color === null || String(action.font_color).trim() === ""))
+        var fontColorRaw = String(action.font_color === undefined || action.font_color === null ? "" : action.font_color).trim().toLowerCase();
+        if (fontColorRaw && fontColorRaw !== "auto")
             rgFont.SetFontColor(colorFromHex(action.font_color));
         return;
     }
@@ -296,7 +505,7 @@ function executeAction(action) {
     if (type === "set_number_format") {
         var shFmt = sheetByRef(action.sheet);
         var rgFmt = rangeOn(shFmt, action.range || "A1");
-        var fmt = String(action.format || "General");
+        var fmt = buildNumberFormat(action);
         rgFmt.SetNumberFormat(fmt);
         return;
     }
@@ -475,6 +684,17 @@ function executeAction(action) {
     if (type === "set_gridlines") {
         var shGrid = sheetByRef(action.sheet);
         shGrid.SetDisplayGridlines(toBool(action.show, true));
+        return;
+    }
+
+    if (type === "replace_token") {
+        var token = String(action.token === undefined || action.token === null ? "" : action.token);
+        if (!token)
+            return;
+        var replacement = String(action.value === undefined || action.value === null ? "" : action.value);
+        var targets = sheetsForScope(action.scope, action.sheets);
+        for (var si = 0; si < targets.length; si += 1)
+            replaceTokenOnSheet(targets[si], token, replacement);
         return;
     }
 
