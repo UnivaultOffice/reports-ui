@@ -1,3 +1,7 @@
 docbuilder/bin/
 docbuilder/scripts/_tmp_*
 docbuilder/scripts/*.xlsx
+generated/
+data/scenarios.json
+data/scenarios/
+*.reportspack.json

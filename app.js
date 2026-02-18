@@ -2,15 +2,20 @@
 (()=>{
 'use strict';
 
-const STORAGE='reports.scenarios.v2';
+const STORAGE='reports.scenarios.v3';
+const SCENARIOS_LEGACY_FILE='data\\scenarios.json';
+const SCENARIOS_DIR='data\\scenarios';
+const SCENARIOS_INDEX_FILE='data\\scenarios\\index.json';
 const SCRIPT='docbuilder/scripts/reports_executor.docbuilder';
 const PROBE_TTL=60000;
 const PENDING=Object.create(null);
 const WATCH=Object.create(null);
+const FILE_PENDING=Object.create(null);
 const SCENARIO_TEMPLATE_EXT='xlsx';
+const GENERATED_DIR='generated';
 const THEME_IDS=['theme-light','theme-classic-light','theme-dark','theme-contrast-dark','theme-gray','theme-white','theme-night'];
 
-const state={scenarios:[],q:'',draft:null,running:null,probe:null,toastTimer:null,runInput:null};
+const state={scenarios:[],scenarioFiles:Object.create(null),persistScenariosPromise:Promise.resolve(),q:'',draft:null,running:null,probe:null,toastTimer:null,runInput:null,listEditor:null,exportPack:null,inputCollapsed:false,actionCollapsed:false,collapsedInputItems:Object.create(null),collapsedActionItems:Object.create(null),fileBridge:'unknown',fileSaveWarned:false};
 
 const schema={
   set_cell_value:{label:'Вставить значение',d:{sheet:'Лист1',range:'A1',mode:'text',value:'',merge:false,keep_template_format:true,apply_alignment:false,horizontal:'',vertical:'',wrap:false,apply_number_format:false,format_preset:'general',decimals:'2',use_thousands:false,currency_symbol:'₽',negative_red:false,custom_format:'General',format:'General',apply_font:false,font_name:'Arial',font_size:'11',bold:false,italic:false,underline:'none',strikeout:false,font_color:'auto',apply_fill:false,fill_color:'none'},f:[
@@ -191,14 +196,30 @@ const typeList=Object.keys(schema).map(k=>[k,schema[k].label]);
 const els={
   list:document.getElementById('scenario-list'),empty:document.getElementById('empty-state'),search:document.getElementById('search-input'),
   btnCreate:document.getElementById('btn-create'),modal:document.getElementById('scenario-modal'),title:document.getElementById('modal-title'),
+  btnExportPack:document.getElementById('btn-export-pack'),btnImportPack:document.getElementById('btn-import-pack'),
+  importPackInput:document.getElementById('import-pack-input'),
   btnClose:document.getElementById('btn-close-modal'),btnCancel:document.getElementById('btn-cancel'),btnSave:document.getElementById('btn-save'),
   name:document.getElementById('scenario-name'),tpl:document.getElementById('scenario-template'),descr:document.getElementById('scenario-description'),
   inputList:document.getElementById('input-field-list'),btnAddInputField:document.getElementById('btn-add-input-field'),
+  btnAddInputFieldBottom:document.getElementById('btn-add-input-field-bottom'),
+  btnToggleInputSection:document.getElementById('btn-toggle-input-section'),
+  inputSectionBody:document.getElementById('input-section-body'),
   btnPick:document.getElementById('btn-pick-template'),file:document.getElementById('template-file-input'),actionList:document.getElementById('action-list'),
-  btnAddAction:document.getElementById('btn-add-action'),toast:document.getElementById('toast'),
+  btnAddAction:document.getElementById('btn-add-action'),
+  btnAddActionBottom:document.getElementById('btn-add-action-bottom'),
+  btnToggleActionSection:document.getElementById('btn-toggle-action-section'),
+  actionSectionBody:document.getElementById('action-section-body'),
+  toast:document.getElementById('toast'),
   runInputModal:document.getElementById('run-input-modal'),runInputTitle:document.getElementById('run-input-title'),
   runInputFields:document.getElementById('run-input-fields'),btnRunInputCancel:document.getElementById('btn-run-input-cancel'),
-  btnRunInputSubmit:document.getElementById('btn-run-input-submit')
+  btnRunInputSubmit:document.getElementById('btn-run-input-submit'),
+  listEditorModal:document.getElementById('list-editor-modal'),listEditorTitle:document.getElementById('list-editor-title'),
+  listEditorSubtitle:document.getElementById('list-editor-subtitle'),listEditorText:document.getElementById('list-editor-text'),
+  btnListEditorClose:document.getElementById('btn-list-editor-close'),btnListEditorCancel:document.getElementById('btn-list-editor-cancel'),
+  btnListEditorApply:document.getElementById('btn-list-editor-apply'),
+  exportPackModal:document.getElementById('export-pack-modal'),exportPackList:document.getElementById('export-pack-list'),
+  btnExportPackClose:document.getElementById('btn-export-pack-close'),btnExportPackCancel:document.getElementById('btn-export-pack-cancel'),
+  btnExportPackSubmit:document.getElementById('btn-export-pack-submit')
 };
 
 function uid(p){return `${p}-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;}
@@ -234,8 +255,27 @@ function resolveTemplate(raw){
   const root=getRoot();
   return root?joinPath(root,'reports-ui',rel):rel;
 }
+function isAbsPath(p){const s=normSlashes(p);return /^[a-zA-Z]:\\/.test(s)||/^\\\\/.test(s);}
 function getReportsUiDir(){const root=getRoot();return root?joinPath(root,'reports-ui'):'reports-ui';}
 function getTemplatesDir(){return joinPath(getReportsUiDir(),'templates');}
+function getLegacyScenariosPath(){return joinPath(getReportsUiDir(),SCENARIOS_LEGACY_FILE);}
+function getScenariosDir(){return joinPath(getReportsUiDir(),SCENARIOS_DIR);}
+function getScenariosIndexPath(){return joinPath(getReportsUiDir(),SCENARIOS_INDEX_FILE);}
+function getScenarioPath(fileName){return joinPath(getScenariosDir(),String(fileName||''));}
+function reportsDirFromProbe(probe){
+  const runtime=probe&&probe.runtimeDir?normSlashes(probe.runtimeDir):'';
+  if(!runtime||!isAbsPath(runtime))return '';
+  const probeReports=dirName(dirName(runtime));
+  return /\\reports-ui$/i.test(probeReports)?probeReports:'';
+}
+function getGeneratedDir(probe,tpl){
+  const configured=getReportsUiDir();
+  if(isAbsPath(configured))return joinPath(configured,GENERATED_DIR);
+  const fromProbe=reportsDirFromProbe(probe);
+  if(fromProbe)return joinPath(fromProbe,GENERATED_DIR);
+  const base=dirName(tpl||'');
+  return base?joinPath(base,GENERATED_DIR):joinPath('reports-ui',GENERATED_DIR);
+}
 function sanitizeTemplateName(name){
   let out=String(name||'').replace(/[<>:"/\\|?*\u0000-\u001F]+/g,' ').replace(/\s+/g,' ').trim();
   out=out.replace(/\.(xlsx|xlsm|xls)$/i,'');
@@ -244,16 +284,36 @@ function sanitizeTemplateName(name){
   if(/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(out))out=`${out}_`;
   return out;
 }
-function fmtStamp(){const d=new Date();return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}-${String(d.getHours()).padStart(2,'0')}${String(d.getMinutes()).padStart(2,'0')}${String(d.getSeconds()).padStart(2,'0')}`;}
-function safeFile(n){
-  const raw=String(n||'scenario');
-  const s=raw
-    .replace(/[^\x00-\x7F]/g,'_')
-    .replace(/[<>:"/\\|?*]+/g,'_')
-    .replace(/\s+/g,'_')
-    .replace(/_+/g,'_')
-    .replace(/^_+|_+$/g,'');
-  return s||'scenario';
+function sanitizeScenarioFileBase(name){
+  let out=String(name||'').replace(/[<>:"/\\|?*\u0000-\u001F]+/g,' ').replace(/\s+/g,' ').trim();
+  out=out.replace(/\.json$/i,'');
+  out=out.replace(/[. ]+$/g,'');
+  if(!out)out='Сценарий';
+  if(/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(out))out=`${out}_`;
+  return out;
+}
+function makeScenarioFileName(name){return `${sanitizeScenarioFileBase(name)}.json`;}
+function ensureScenarioFileNameUniq(fileName,used){
+  let candidate=String(fileName||'').trim();
+  if(!candidate)candidate='Сценарий.json';
+  const base=sanitizeScenarioFileBase(candidate);
+  let next=`${base}.json`;
+  let i=2;
+  while(used[next.toLowerCase()]){
+    next=`${base} (${i}).json`;
+    i+=1;
+  }
+  used[next.toLowerCase()]=true;
+  return next;
+}
+function fmtStamp(){
+  const d=new Date();
+  const dd=String(d.getDate()).padStart(2,'0');
+  const mm=String(d.getMonth()+1).padStart(2,'0');
+  const yy=String(d.getFullYear()).slice(-2);
+  const hh=String(d.getHours()).padStart(2,'0');
+  const mi=String(d.getMinutes()).padStart(2,'0');
+  return `${dd}-${mm}-${yy}_${hh}-${mi}`;
 }
 function getThemeTypeFromId(themeId){
   const id=String(themeId||'').toLowerCase();
@@ -401,7 +461,11 @@ function bindThemeSync(){
     }
   }catch(_){ }
 }
-function mkOutputPath(sc,probe,tpl){const runtime=probe&&probe.runtimeDir?normSlashes(probe.runtimeDir):'';const outDir=runtime?joinPath(runtime,'temp'):dirName(tpl);return joinPath(outDir,`${safeFile(sc.name)}-${fmtStamp()}.xlsx`);}
+function mkOutputPath(sc,probe,tpl){
+  const outDir=getGeneratedDir(probe,tpl);
+  const baseName=sanitizeTemplateName(sc&&sc.name?sc.name:'Сценарий').replace(/\s+/g,' ');
+  return joinPath(outDir,`${baseName}_${fmtStamp()}.xlsx`);
+}
 function extType(path){
   const ext=(String(path||'').split('.').pop()||'xlsx').toLowerCase();
   const map={docx:65,doc:66,odt:67,rtf:68,txt:69,pdf:513,xlsx:257,xls:258,ods:259,csv:260,xlsm:261,xltx:262,xltm:263,xlsb:264,pptx:129,ppt:130,odp:131};
@@ -541,8 +605,29 @@ function normalizeInputType(value){
 function parseInputOptions(raw){
   const out=[];
   const seen=Object.create(null);
-  String(raw||'').split(/[\n;,]+/).forEach(part=>{
-    const v=String(part||'').trim();
+  const text=String(raw||'');
+  let parts=[];
+  if(Array.isArray(raw)){
+    parts=raw;
+  }else if(/\r?\n/.test(text)){
+    parts=text.split(/\r?\n/);
+  }else if(text.indexOf('\t')>=0){
+    parts=text.split('\t');
+  }else if(text.indexOf(';')>=0){
+    parts=text.split(';');
+  }else if(text.indexOf(',')>=0){
+    const csvParts=text.split(',');
+    // Legacy support: split by comma only for simple one-word tokens like "A,B,C".
+    const looksLikeSimpleCsv=csvParts.length>1&&csvParts.every(item=>{
+      const v=String(item||'').trim();
+      return v!==''&&v.indexOf(' ')<0;
+    });
+    parts=looksLikeSimpleCsv?csvParts:[text];
+  }else{
+    parts=[text];
+  }
+  parts.forEach(part=>{
+    const v=String(part==null?'':part).trim();
     if(!v)return;
     const key=v.toLowerCase();
     if(seen[key])return;
@@ -550,6 +635,146 @@ function parseInputOptions(raw){
     out.push(v);
   });
   return out;
+}
+function stringifyInputOptions(values){
+  const out=[];
+  const seen=Object.create(null);
+  (Array.isArray(values)?values:[]).forEach(item=>{
+    const v=String(item==null?'':item).trim();
+    if(!v)return;
+    const key=v.toLowerCase();
+    if(seen[key])return;
+    seen[key]=true;
+    out.push(v);
+  });
+  return out.join('; ');
+}
+function optionsFromLines(raw){
+  const out=[];
+  const seen=Object.create(null);
+  String(raw||'').split(/\r?\n/).forEach(line=>{
+    const v=String(line||'').trim();
+    if(!v)return;
+    const key=v.toLowerCase();
+    if(seen[key])return;
+    seen[key]=true;
+    out.push(v);
+  });
+  return out;
+}
+function optionsToLines(values){
+  const list=Array.isArray(values)?values:parseInputOptions(values);
+  return list.map(item=>String(item==null?'':item).trim()).filter(Boolean).join('\n');
+}
+function optionsPreview(values,max){
+  const list=Array.isArray(values)?values:parseInputOptions(values);
+  const clean=list.map(item=>String(item==null?'':item).trim()).filter(Boolean);
+  if(!clean.length)return 'Список пуст';
+  const limit=Math.max(1,parseInt(max,10)||3);
+  if(clean.length<=limit)return clean.join(', ');
+  return `${clean.slice(0,limit).join(', ')} ... (+${clean.length-limit})`;
+}
+function parseDependentRules(raw){
+  const rules=[];
+  const lines=String(raw||'').split(/\r?\n/);
+  for(let i=0;i<lines.length;i+=1){
+    const line=String(lines[i]||'').trim();
+    if(!line)continue;
+    const posColon=line.indexOf(':');
+    const posEq=line.indexOf('=');
+    let sep=-1;
+    if(posColon>0&&posEq>0)sep=Math.min(posColon,posEq);
+    else if(posColon>0)sep=posColon;
+    else if(posEq>0)sep=posEq;
+    if(sep<=0){
+      return {rules,error:`строка ${i+1}: используйте формат "Значение родителя: Вариант 1; Вариант 2".`};
+    }
+    const key=line.slice(0,sep).trim();
+    const valuesRaw=line.slice(sep+1).trim();
+    if(!key)return {rules,error:`строка ${i+1}: не указано значение родителя.`};
+    const options=parseInputOptions(valuesRaw);
+    if(!options.length)return {rules,error:`строка ${i+1}: не указаны варианты зависимого списка.`};
+    rules.push({key,options});
+  }
+  return {rules,error:''};
+}
+function stringifyDependentRules(rules){
+  const lines=[];
+  const seen=Object.create(null);
+  (Array.isArray(rules)?rules:[]).forEach(rule=>{
+    const key=String(rule&&rule.key!=null?rule.key:'').trim();
+    if(!key)return;
+    const options=stringifyInputOptions(rule&&rule.options);
+    if(!options)return;
+    const uniqKey=key.toLowerCase();
+    if(seen[uniqKey])return;
+    seen[uniqKey]=true;
+    lines.push(`${key}: ${options}`);
+  });
+  return lines.join('\n');
+}
+function parseDependentOptionsMap(raw){
+  const map=Object.create(null);
+  const mapLower=Object.create(null);
+  const parsed=parseDependentRules(raw);
+  let valuesCount=0;
+  if(parsed.error)return {map,mapLower,valuesCount,error:parsed.error};
+  for(let i=0;i<parsed.rules.length;i+=1){
+    const rule=parsed.rules[i];
+    const key=String(rule.key||'').trim();
+    const options=Array.isArray(rule.options)?rule.options:[];
+    map[key]=options;
+    const low=key.toLowerCase();
+    if(!Object.prototype.hasOwnProperty.call(mapLower,low))mapLower[low]=options;
+    valuesCount+=options.length;
+  }
+  return {map,mapLower,valuesCount,error:''};
+}
+function resolveSelectOptions(field,parentValue){
+  const base=parseInputOptions(field&&field.options);
+  if(!field||normalizeInputType(field.input_type)!=='select')return base;
+  const parentId=String(field.depends_on||'').trim();
+  if(!parentId)return base;
+  const allowFallback=field.fallback_on_missing!==false;
+  const parsed=parseDependentOptionsMap(field.options_map);
+  if(parsed.error)return allowFallback?base:[];
+  const key=String(parentValue==null?'':parentValue).trim();
+  if(!key)return [];
+  if(Object.prototype.hasOwnProperty.call(parsed.map,key))return parsed.map[key];
+  const low=key.toLowerCase();
+  if(Object.prototype.hasOwnProperty.call(parsed.mapLower,low))return parsed.mapLower[low];
+  return allowFallback?base:[];
+}
+function findInputDependencyCycle(fields){
+  const links=Object.create(null);
+  const normalized=Array.isArray(fields)?fields.map(normInputField):[];
+  normalized.forEach(field=>{
+    if(field.input_type!=='select')return;
+    const parent=String(field.depends_on||'').trim();
+    if(!parent||parent===field.id)return;
+    links[field.id]=parent;
+  });
+  const visited=Object.create(null);
+  const inStack=Object.create(null);
+  const visit=(id)=>{
+    if(inStack[id])return id;
+    if(visited[id])return '';
+    visited[id]=true;
+    inStack[id]=true;
+    const parent=links[id];
+    if(parent&&links[parent]){
+      const found=visit(parent);
+      if(found)return found;
+    }
+    delete inStack[id];
+    return '';
+  };
+  const ids=Object.keys(links);
+  for(let i=0;i<ids.length;i+=1){
+    const found=visit(ids[i]);
+    if(found)return found;
+  }
+  return '';
 }
 function normalizeConditionOperator(value){
   const raw=String(value==null?'equals':value).trim().toLowerCase();
@@ -1021,6 +1246,9 @@ function mkInputField(){
     sheets:'',
     input_type:'text',
     options:'',
+    depends_on:'',
+    options_map:'',
+    fallback_on_missing:true,
     multiple:false,
     multiple_direction:'rows',
     multiple_insert:true,
@@ -1072,6 +1300,15 @@ function normInputField(field){
   out.sheets=String(src.sheets||'').trim();
   out.input_type=normalizeInputType(src.input_type||src.type||'text');
   out.options=String(src.options||'').trim();
+  out.depends_on=String(src.depends_on||src.dependsOn||'').trim();
+  out.options_map=String(src.options_map||src.optionsMap||'').trim();
+  if(src.fallback_on_missing===undefined&&src.fallbackOnMissing===undefined){
+    out.fallback_on_missing=out.depends_on?parseInputOptions(out.options).length>0:true;
+  }else{
+    out.fallback_on_missing=src.fallback_on_missing===undefined?!!src.fallbackOnMissing:!!src.fallback_on_missing;
+  }
+  if(out.depends_on===out.id)out.depends_on='';
+  if(!out.depends_on)out.fallback_on_missing=true;
   out.multiple=!!src.multiple;
   out.multiple_direction=String(src.multiple_direction||src.repeat_direction||'rows').trim().toLowerCase()==='columns'?'columns':'rows';
   out.multiple_insert=src.multiple_insert===undefined?true:!!src.multiple_insert;
@@ -1173,19 +1410,294 @@ function normScenario(s){
     lastRunAt:s.lastRunAt||s.last_run||null
   };
 }
-function save(){try{localStorage.setItem(STORAGE,JSON.stringify(state.scenarios));}catch(_){toast('Не удалось сохранить сценарии.','error');}}
-function load(){const raw=parse(localStorage.getItem(STORAGE));state.scenarios=Array.isArray(raw)?raw.map(normScenario).filter(Boolean):[];}
+function normalizeScenarios(raw){return Array.isArray(raw)?raw.map(normScenario).filter(Boolean):[];}
+function saveLocalStorageOnly(){try{localStorage.setItem(STORAGE,JSON.stringify(state.scenarios));}catch(_){toast('Не удалось сохранить сценарии.','error');}}
+function loadLocalStorageOnly(){
+  const raw=parse(localStorage.getItem(STORAGE));
+  state.scenarios=normalizeScenarios(raw);
+  state.scenarioFiles=Object.create(null);
+}
+function clearFilePending(id){
+  const p=FILE_PENDING[id];
+  if(!p)return null;
+  if(p.t)clearTimeout(p.t);
+  delete FILE_PENDING[id];
+  return p;
+}
+function addFilePending(id,res,rej,ms){
+  FILE_PENDING[id]={
+    res,rej,
+    t:setTimeout(()=>{
+      const p=clearFilePending(id);
+      if(!p)return;
+      if(state.fileBridge==='unknown')state.fileBridge='missing';
+      const e=new Error('Таймаут доступа к файлу сценариев');
+      e.details={requestId:id,error:'timeout'};
+      p.rej(e);
+    },ms)
+  };
+}
+function fileErr(raw){
+  const e=new Error((raw&&raw.error)||'Ошибка работы с файлом сценариев');
+  e.details=raw||{};
+  return e;
+}
+function onNativeFileResult(raw){
+  const data=parseNativeParam(raw);
+  if(!isObj(data))return;
+  state.fileBridge='ready';
+  const id=data.requestId?String(data.requestId):'';
+  if(!id)return;
+  const p=clearFilePending(id);
+  if(!p)return;
+  p.res(data);
+}
+function canUseNativeFileBridge(){
+  if(state.fileBridge==='missing')return false;
+  const sdk=window.parent&&window.parent.sdk;
+  if(!sdk||typeof sdk.command!=='function')return false;
+  return bindDirectNative();
+}
+function requestNativeFile(cmd,payload,ms){
+  return new Promise((resolve,reject)=>{
+    if(!canUseNativeFileBridge()){
+      const e=new Error('Native file bridge unavailable');
+      e.details={error:'bridge_unavailable'};
+      reject(e);
+      return;
+    }
+    const sdk=window.parent&&window.parent.sdk;
+    const body=isObj(payload)?Object.assign({},payload):{};
+    const id=body.requestId||reqId('reports-file');
+    body.requestId=id;
+    addFilePending(id,resolve,reject,ms);
+    try{
+      sdk.command(cmd,JSON.stringify(body));
+    }catch(err){
+      const p=clearFilePending(id);
+      if(!p)return;
+      const e=new Error('Не удалось отправить команду сохранения сценариев');
+      e.details={requestId:id,error:String(err||'command_failed')};
+      p.rej(e);
+    }
+  });
+}
+async function readScenariosFile(){
+  const r=await requestNativeFile('reports:fileRead',{path:getLegacyScenariosPath()},3000);
+  return isObj(r)?r:{ok:false,error:'invalid_read_response'};
+}
+async function readTextFile(path,timeoutMs){
+  const r=await requestNativeFile('reports:fileRead',{path},timeoutMs||3000);
+  return isObj(r)?r:{ok:false,error:'invalid_read_response'};
+}
+async function writeTextFile(path,content,timeoutMs){
+  const r=await requestNativeFile('reports:fileWrite',{path,content:String(content||'')},timeoutMs||5000);
+  if(!isObj(r)||!r.ok)throw fileErr(r||{error:'write_failed'});
+  return r;
+}
+function parseScenarioIndex(rawText){
+  const raw=parse(rawText);
+  const src=Array.isArray(raw)?raw:(isObj(raw)&&Array.isArray(raw.items)?raw.items:[]);
+  const out=[];
+  src.forEach(item=>{
+    if(typeof item==='string'){
+      const file=String(item||'').trim();
+      if(file)out.push({id:'',file});
+      return;
+    }
+    if(!isObj(item))return;
+    const file=String(item.file||item.path||'').trim();
+    if(!file)return;
+    out.push({id:String(item.id||'').trim(),file});
+  });
+  return out;
+}
+function buildScenarioIndex(){
+  return {
+    version:1,
+    items:state.scenarios.map(sc=>({
+      id:sc.id,
+      file:String(state.scenarioFiles[sc.id]||'').trim(),
+      name:String(sc.name||''),
+      updatedAt:sc.updatedAt||''
+    })).filter(item=>item.file)
+  };
+}
+function ensureScenarioFilesMap(){
+  const used=Object.create(null);
+  const next=Object.create(null);
+  state.scenarios.forEach(sc=>{
+    const prev=String(state.scenarioFiles[sc.id]||'').trim();
+    const candidate=prev||makeScenarioFileName(sc.name);
+    next[sc.id]=ensureScenarioFileNameUniq(candidate,used);
+  });
+  state.scenarioFiles=next;
+}
+async function persistScenariosToFiles(){
+  ensureScenarioFilesMap();
+  for(let i=0;i<state.scenarios.length;i+=1){
+    const sc=normScenario(state.scenarios[i]);
+    state.scenarios[i]=sc;
+    const fileName=state.scenarioFiles[sc.id];
+    if(!fileName)continue;
+    const path=getScenarioPath(fileName);
+    const body=`${JSON.stringify(sc,null,2)}\n`;
+    await writeTextFile(path,body,6000);
+  }
+  const indexBody=`${JSON.stringify(buildScenarioIndex(),null,2)}\n`;
+  await writeTextFile(getScenariosIndexPath(),indexBody,6000);
+}
+function queuePersistScenarios(){
+  if(state.fileBridge!=='ready')return Promise.resolve();
+  state.persistScenariosPromise=state.persistScenariosPromise
+    .catch(()=>{})
+    .then(()=>persistScenariosToFiles());
+  return state.persistScenariosPromise;
+}
+async function loadScenariosFromScenarioFiles(){
+  const indexPath=getScenariosIndexPath();
+  const indexRes=await readTextFile(indexPath,3000);
+  if(!indexRes.ok){
+    if(indexRes.error==='not_found'){
+      const legacyRes=await readScenariosFile();
+      if(legacyRes.ok){
+        state.scenarios=normalizeScenarios(parse(legacyRes.content||'[]'));
+        state.scenarioFiles=Object.create(null);
+        ensureScenarioFilesMap();
+        await persistScenariosToFiles().catch(()=>{});
+        return true;
+      }
+      if(legacyRes.error==='not_found'){
+        state.scenarios=[];
+        state.scenarioFiles=Object.create(null);
+        await writeTextFile(indexPath,'{\n  "version": 1,\n  "items": []\n}\n',4000).catch(()=>{});
+        return true;
+      }
+    }
+    return false;
+  }
+
+  const refs=parseScenarioIndex(indexRes.content||'');
+  if(!refs.length){
+    state.scenarios=[];
+    state.scenarioFiles=Object.create(null);
+    return true;
+  }
+
+  const list=[];
+  const filesById=Object.create(null);
+  const usedIds=Object.create(null);
+  for(let i=0;i<refs.length;i+=1){
+    const ref=refs[i];
+    const scenarioPath=getScenarioPath(ref.file);
+    const scenarioRes=await readTextFile(scenarioPath,3000).catch(()=>null);
+    if(!scenarioRes||!scenarioRes.ok)continue;
+    const sc=normScenario(parse(scenarioRes.content||''));
+    if(!sc)continue;
+    if(usedIds[sc.id])sc.id=uid('scenario');
+    usedIds[sc.id]=true;
+    list.push(sc);
+    filesById[sc.id]=ref.file;
+  }
+  state.scenarios=list;
+  state.scenarioFiles=filesById;
+  return true;
+}
+function save(){
+  saveLocalStorageOnly();
+  if(state.fileBridge!=='ready')return;
+  queuePersistScenarios()
+    .then(()=>{state.fileSaveWarned=false;})
+    .catch(()=>{
+      if(state.fileSaveWarned)return;
+      state.fileSaveWarned=true;
+      toast('Не удалось сохранить сценарии в reports-ui/data/scenarios/.','error');
+    });
+}
+async function load(){
+  try{localStorage.removeItem('reports.scenarios.v2');}catch(_){ }
+  if(canUseNativeFileBridge()){
+    try{
+      const loaded=await loadScenariosFromScenarioFiles();
+      if(loaded){
+        saveLocalStorageOnly();
+        return;
+      }
+    }catch(_){
+      state.fileBridge='missing';
+    }
+  }
+  loadLocalStorageOnly();
+}
+
+function getItemCollapseMap(kind){
+  return kind==='action'?state.collapsedActionItems:state.collapsedInputItems;
+}
+function isItemCollapsed(kind,id){
+  const key=String(id||'').trim();
+  if(!key)return false;
+  return !!getItemCollapseMap(kind)[key];
+}
+function setItemCollapsed(kind,id,collapsed){
+  const key=String(id||'').trim();
+  if(!key)return;
+  const map=getItemCollapseMap(kind);
+  if(collapsed)map[key]=true;
+  else delete map[key];
+}
+function toggleItemCollapsed(kind,id){
+  setItemCollapsed(kind,id,!isItemCollapsed(kind,id));
+}
+function resetItemCollapsedState(){
+  state.collapsedInputItems=Object.create(null);
+  state.collapsedActionItems=Object.create(null);
+}
 
 function openModal(id){
   const src=state.scenarios.find(x=>x.id===id);
-  state.draft=src?clone(src):{id:uid('scenario'),name:'',description:'',templatePath:'',actions:[mkAction('set_cell_value')],inputFields:[],createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),lastRunAt:null};
+  state.draft=src?clone(src):{id:uid('scenario'),name:'',description:'',templatePath:'',actions:[],inputFields:[],createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),lastRunAt:null};
+  resetItemCollapsedState();
+  if(!Array.isArray(state.draft.actions))state.draft.actions=[];
+  state.draft.actions=state.draft.actions.map(raw=>{
+    const action=normAction(raw);
+    if(!action.id)action.id=uid('action');
+    return action;
+  });
   if(!Array.isArray(state.draft.inputFields))state.draft.inputFields=[];
   state.draft.inputFields=state.draft.inputFields.map(normInputField);
+  if(src){
+    // При редактировании существующего сценария: секции открыты, элементы свернуты.
+    state.inputCollapsed=false;
+    state.actionCollapsed=false;
+    state.draft.inputFields.forEach(field=>setItemCollapsed('input',field.id,true));
+    state.draft.actions.forEach(action=>setItemCollapsed('action',action.id,true));
+  }
   els.title.textContent=src?'Изменение сценария':'Новый сценарий';
   els.name.value=state.draft.name; els.tpl.value=state.draft.templatePath; els.descr.value=state.draft.description;
-  renderInputFields(); renderActions(); els.modal.classList.remove('hidden'); els.name.focus();
+  renderInputFields(); renderActions(); syncSectionCollapseUi(); els.modal.classList.remove('hidden'); els.name.focus();
 }
-function closeModal(){els.modal.classList.add('hidden');state.draft=null;}
+function closeModal(){els.modal.classList.add('hidden');state.draft=null;resetItemCollapsedState();}
+
+function setSectionCollapsed(kind,collapsed){
+  const isInput=kind==='input';
+  if(isInput)state.inputCollapsed=!!collapsed;
+  else state.actionCollapsed=!!collapsed;
+  const body=isInput?els.inputSectionBody:els.actionSectionBody;
+  const btn=isInput?els.btnToggleInputSection:els.btnToggleActionSection;
+  if(body)body.classList.toggle('hidden',!!collapsed);
+  if(btn){
+    btn.textContent=collapsed?'Развернуть':'Свернуть';
+    btn.setAttribute('aria-expanded',collapsed?'false':'true');
+  }
+}
+function toggleSection(kind){
+  if(kind==='input')setSectionCollapsed('input',!state.inputCollapsed);
+  else setSectionCollapsed('action',!state.actionCollapsed);
+}
+function syncSectionCollapseUi(){
+  setSectionCollapsed('input',state.inputCollapsed);
+  setSectionCollapsed('action',state.actionCollapsed);
+}
 
 function renderList(){
   const q=state.q.trim().toLowerCase();
@@ -1205,7 +1717,7 @@ function renderList(){
     const bRun=document.createElement('button');bRun.className='btn btn-primary';bRun.type='button';bRun.textContent=state.running===s.id?'Выполняется...':'Заполнить';bRun.disabled=!!state.running||!!state.runInput;bRun.onclick=()=>runScenario(s.id);
     const bEdit=document.createElement('button');bEdit.className='btn btn-secondary';bEdit.type='button';bEdit.textContent='Изменить';bEdit.onclick=()=>openModal(s.id);
     const bTpl=document.createElement('button');bTpl.className='btn btn-ghost';bTpl.type='button';bTpl.textContent='Открыть шаблон';bTpl.disabled=!s.templatePath;bTpl.onclick=()=>openTemplateInEditor(s.id);
-    const bDel=document.createElement('button');bDel.className='btn btn-danger';bDel.type='button';bDel.textContent='Удалить';bDel.onclick=()=>{if(confirm(`Удалить сценарий "${s.name}"?`)){state.scenarios=state.scenarios.filter(x=>x.id!==s.id);save();renderList();toast('Сценарий удален.','ok');}};
+    const bDel=document.createElement('button');bDel.className='btn btn-danger';bDel.type='button';bDel.textContent='Удалить';bDel.onclick=()=>{if(confirm(`Удалить сценарий "${s.name}"?`)){state.scenarios=state.scenarios.filter(x=>x.id!==s.id);delete state.scenarioFiles[s.id];save();renderList();toast('Сценарий удален.','ok');}};
     [bRun,bEdit,bTpl,bDel].forEach(x=>a.appendChild(x));
     els.list.appendChild(c);
   });
@@ -1216,16 +1728,28 @@ function renderActions(){
   const root=els.actionList; root.innerHTML='';
   if(!state.draft||!state.draft.actions.length){const e=document.createElement('div');e.className='action-item';e.textContent='Добавьте хотя бы одно действие.';root.appendChild(e);return;}
   state.draft.actions.forEach((a,i)=>{
+    if(!a.id)a.id=uid('action');
     const item=document.createElement('div');item.className='action-item';
+    const collapsed=isItemCollapsed('action',a.id);
+    if(collapsed)item.classList.add('item-collapsed');
     const head=document.createElement('div');head.className='action-item-head';
     const ord=document.createElement('span');ord.className='order';ord.textContent=String(i+1);
     const sel=document.createElement('select');typeList.forEach(t=>{const o=document.createElement('option');o.value=t[0];o.textContent=t[1];o.selected=t[0]===a.type;sel.appendChild(o);});
     sel.onchange=(ev)=>{const n=mkAction(ev.target.value);n.id=a.id;if('sheet' in n&&a.sheet)n.sheet=a.sheet;state.draft.actions[i]=n;renderActions();};
     const tools=document.createElement('div');tools.className='action-tools';
+    const tg=document.createElement('button');tg.className='btn btn-ghost';tg.type='button';tg.textContent=collapsed?'Развернуть':'Свернуть';tg.onclick=()=>{toggleItemCollapsed('action',a.id);renderActions();};
     const up=document.createElement('button');up.className='btn btn-ghost';up.type='button';up.textContent='↑';up.disabled=i===0;up.onclick=()=>{const t=state.draft.actions[i-1];state.draft.actions[i-1]=state.draft.actions[i];state.draft.actions[i]=t;renderActions();};
     const dn=document.createElement('button');dn.className='btn btn-ghost';dn.type='button';dn.textContent='↓';dn.disabled=i===state.draft.actions.length-1;dn.onclick=()=>{const t=state.draft.actions[i+1];state.draft.actions[i+1]=state.draft.actions[i];state.draft.actions[i]=t;renderActions();};
     const rm=document.createElement('button');rm.className='btn btn-danger';rm.type='button';rm.textContent='Удалить';rm.onclick=()=>{state.draft.actions.splice(i,1);renderActions();};
-    [up,dn,rm].forEach(x=>tools.appendChild(x)); [ord,sel,tools].forEach(x=>head.appendChild(x)); item.appendChild(head);
+    [tg,up,dn,rm].forEach(x=>tools.appendChild(x)); [ord,sel,tools].forEach(x=>head.appendChild(x)); item.appendChild(head);
+    if(collapsed){
+      const note=document.createElement('div');
+      note.className='item-collapsed-note';
+      note.textContent='Шаг свернут';
+      item.appendChild(note);
+      root.appendChild(item);
+      return;
+    }
     const fs=document.createElement('div');fs.className='action-fields';
     (schema[a.type].f||[]).forEach(f=>{
       if(f.showIf&&!a[f.showIf])return;
@@ -1323,6 +1847,8 @@ function renderInputFields(){
     state.draft.inputFields[i]=f;
     const item=document.createElement('div');
     item.className='action-item input-field-item';
+    const collapsed=isItemCollapsed('input',f.id);
+    if(collapsed)item.classList.add('item-collapsed');
 
     const head=document.createElement('div');
     head.className='action-item-head';
@@ -1334,6 +1860,11 @@ function renderInputFields(){
     title.textContent=inputFieldLabel(f,i);
     const tools=document.createElement('div');
     tools.className='action-tools';
+    const tg=document.createElement('button');
+    tg.className='btn btn-ghost';
+    tg.type='button';
+    tg.textContent=collapsed?'Развернуть':'Свернуть';
+    tg.onclick=()=>{toggleItemCollapsed('input',f.id);renderInputFields();};
     const up=document.createElement('button');
     up.className='btn btn-ghost';
     up.type='button';
@@ -1351,9 +1882,17 @@ function renderInputFields(){
     rm.type='button';
     rm.textContent='Удалить';
     rm.onclick=()=>{state.draft.inputFields.splice(i,1);renderInputFields();};
-    [up,dn,rm].forEach(x=>tools.appendChild(x));
+    [tg,up,dn,rm].forEach(x=>tools.appendChild(x));
     [ord,title,tools].forEach(x=>head.appendChild(x));
     item.appendChild(head);
+    if(collapsed){
+      const note=document.createElement('div');
+      note.className='item-collapsed-note';
+      note.textContent='Поле свернуто';
+      item.appendChild(note);
+      root.appendChild(item);
+      return;
+    }
 
     const fs=document.createElement('div');
     fs.className='action-fields';
@@ -1401,13 +1940,20 @@ function renderInputFields(){
       wDefault.appendChild(capDefault);wDefault.appendChild(inDefault);
     }else if(f.input_type==='select'){
       const inDefault=document.createElement('select');
-      const opts=parseInputOptions(f.options);
+      const allFields=Array.isArray(state.draft&&state.draft.inputFields)?state.draft.inputFields.map(normInputField):[];
+      const parentField=allFields.find(field=>field.id===String(f.depends_on||'').trim());
+      const parentDefault=parentField?normalizeScalarFieldValue(parentField.default_value,parentField.input_type):'';
+      const opts=resolveSelectOptions(f,parentDefault);
       const emptyOpt=document.createElement('option');emptyOpt.value='';emptyOpt.textContent='(пусто)';inDefault.appendChild(emptyOpt);
       opts.forEach(opt=>{const o=document.createElement('option');o.value=opt;o.textContent=opt;inDefault.appendChild(o);});
       const start=String(f.default_value==null?'':f.default_value);
       if(start&&opts.indexOf(start)<0){const extra=document.createElement('option');extra.value=start;extra.textContent=start;inDefault.appendChild(extra);}
       inDefault.value=start;
-      inDefault.onchange=(ev)=>{f.default_value=ev.target.value;};
+      inDefault.onchange=(ev)=>{
+        f.default_value=ev.target.value;
+        const hasDependents=allFields.some(field=>String(field.depends_on||'').trim()===f.id);
+        if(hasDependents)renderInputFields();
+      };
       wDefault.appendChild(capDefault);wDefault.appendChild(inDefault);
     }else{
       const inDefault=document.createElement('input');inDefault.type='text';inDefault.value=String(f.default_value==null?'':f.default_value);inDefault.placeholder='Можно оставить пустым';inDefault.oninput=(ev)=>{f.default_value=ev.target.value;};
@@ -1427,11 +1973,216 @@ function renderInputFields(){
     wInputType.appendChild(capInputType);wInputType.appendChild(inInputType);fs.appendChild(wInputType);
 
     if(f.input_type==='select'){
-      const wOptions=fieldWrap(true);
-      const capOptions=document.createElement('span');capOptions.textContent='Значения списка';
-      const inOptions=document.createElement('textarea');inOptions.rows=2;inOptions.value=f.options;inOptions.placeholder='Вариант 1; Вариант 2; Вариант 3';inOptions.oninput=(ev)=>{f.options=ev.target.value;};
-      const helpOptions=document.createElement('small');helpOptions.className='field-help';helpOptions.textContent='Можно разделять точкой с запятой, запятой или переносом строки.';
-      wOptions.appendChild(capOptions);wOptions.appendChild(inOptions);wOptions.appendChild(helpOptions);fs.appendChild(wOptions);
+      const allFields=Array.isArray(state.draft&&state.draft.inputFields)?state.draft.inputFields.map(normInputField):[];
+      const hasDependency=String(f.depends_on||'').trim()!=='';
+
+      const buildListEditorRow=(title,values,onApply,subtitle)=>{
+        const wrap=fieldWrap(true);
+        const cap=document.createElement('span');cap.textContent=title;
+        const row=document.createElement('div');row.className='list-editor-row';
+        const btn=document.createElement('button');
+        btn.type='button';
+        btn.className='btn btn-secondary';
+        btn.textContent='Список...';
+        const status=document.createElement('span');
+        status.className='list-editor-status';
+        const refreshStatus=(list)=>{
+          const count=Array.isArray(list)?list.length:parseInputOptions(list).length;
+          const preview=optionsPreview(list,2);
+          status.textContent=`Пунктов: ${count}. ${preview}`;
+        };
+        refreshStatus(values);
+        btn.onclick=(ev)=>{
+          ev.preventDefault();
+          openListEditor({
+            title,
+            subtitle:subtitle||'Каждый вариант вводится с новой строки.',
+            values:Array.isArray(values)?values:parseInputOptions(values),
+            onApply:(next)=>{
+              onApply(Array.isArray(next)?next:[]);
+              refreshStatus(next);
+              renderInputFields();
+            }
+          });
+        };
+        row.appendChild(btn);
+        row.appendChild(status);
+        wrap.appendChild(cap);
+        wrap.appendChild(row);
+        return wrap;
+      };
+
+      const wDepends=fieldWrap(false);
+      const capDepends=document.createElement('span');capDepends.textContent='Зависит от поля';
+      const inDepends=document.createElement('select');
+      const noneOpt=document.createElement('option');noneOpt.value='';noneOpt.textContent='(нет зависимости)';inDepends.appendChild(noneOpt);
+      allFields.forEach((other,idx)=>{
+        if(other.id===f.id)return;
+        if(other.input_type!=='select')return;
+        const opt=document.createElement('option');
+        opt.value=other.id;
+        opt.textContent=inputFieldLabel(other,idx);
+        if(String(f.depends_on||'')===other.id)opt.selected=true;
+        inDepends.appendChild(opt);
+      });
+      if(String(f.depends_on||'')&&!allFields.some(other=>other.id===String(f.depends_on||''))){
+        const missed=document.createElement('option');
+        missed.value=String(f.depends_on||'');
+        missed.textContent='(поле не найдено)';
+        missed.selected=true;
+        inDepends.appendChild(missed);
+      }
+      inDepends.onchange=(ev)=>{
+        f.depends_on=String(ev.target.value||'').trim();
+        if(!f.depends_on){
+          f.fallback_on_missing=true;
+        }else if(!parseInputOptions(f.options).length){
+          f.fallback_on_missing=false;
+        }
+        renderInputFields();
+      };
+      wDepends.appendChild(capDepends);wDepends.appendChild(inDepends);fs.appendChild(wDepends);
+
+      if(!hasDependency){
+        const wBaseList=buildListEditorRow(
+          'Варианты списка',
+          parseInputOptions(f.options),
+          (next)=>{f.options=stringifyInputOptions(next);},
+          'Базовый список: один пункт на строку.'
+        );
+        const helpBase=document.createElement('small');
+        helpBase.className='field-help';
+        helpBase.textContent='Откройте редактор списка и вставьте варианты построчно.';
+        wBaseList.appendChild(helpBase);
+        fs.appendChild(wBaseList);
+      }else{
+        const parentField=allFields.find(other=>other.id===String(f.depends_on||'').trim());
+        const parentOptions=parentField?parseInputOptions(parentField.options):[];
+        const dataListId=`dep_parent_${String(f.id||i).replace(/[^a-zA-Z0-9_-]/g,'_')}`;
+
+        const wOptionsMap=fieldWrap(true);
+        const capOptionsMap=document.createElement('span');capOptionsMap.textContent='Зависимые варианты';
+        const parsedRules=parseDependentRules(f.options_map);
+        const ruleRows=parsedRules.rules.map(rule=>({key:rule.key,options:Array.isArray(rule.options)?rule.options:[]}));
+        if(!ruleRows.length)ruleRows.push({key:'',options:[]});
+        const mapBox=document.createElement('div');mapBox.className='dependent-builder';
+        const mapActions=document.createElement('div');mapActions.className='dependent-builder-actions';
+        const btnAddRule=document.createElement('button');btnAddRule.type='button';btnAddRule.className='btn btn-ghost';btnAddRule.textContent='+ Добавить правило';
+        mapActions.appendChild(btnAddRule);
+
+        const parentList=document.createElement('datalist');
+        parentList.id=dataListId;
+        parentOptions.forEach(opt=>{
+          const item=document.createElement('option');
+          item.value=opt;
+          parentList.appendChild(item);
+        });
+
+        const syncRuleRows=()=>{
+          f.options_map=stringifyDependentRules(ruleRows.map(rule=>({key:String(rule.key||'').trim(),options:Array.isArray(rule.options)?rule.options:[]})));
+        };
+
+        const renderRuleRows=()=>{
+          mapBox.innerHTML='';
+          ruleRows.forEach((rule,rowIndex)=>{
+            const row=document.createElement('div');row.className='dependent-builder-row';
+            const parentValue=document.createElement('input');
+            parentValue.type='text';
+            parentValue.setAttribute('list',dataListId);
+            parentValue.value=String(rule.key==null?'':rule.key);
+            parentValue.placeholder='Значение в первом списке';
+            parentValue.oninput=(ev)=>{ruleRows[rowIndex].key=ev.target.value;syncRuleRows();};
+
+            const preview=document.createElement('div');
+            preview.className='dependent-builder-preview';
+            preview.textContent=optionsPreview(rule.options,2);
+
+            const editList=document.createElement('button');
+            editList.type='button';
+            editList.className='btn btn-secondary';
+            editList.textContent=`Список (${Array.isArray(rule.options)?rule.options.length:0})`;
+            editList.onclick=(ev)=>{
+              ev.preventDefault();
+              openListEditor({
+                title:`Список для «${String(ruleRows[rowIndex].key||'').trim()||'значения родителя'}»`,
+                subtitle:'Каждый вариант вводится с новой строки.',
+                values:Array.isArray(ruleRows[rowIndex].options)?ruleRows[rowIndex].options:[],
+                onApply:(next)=>{
+                  ruleRows[rowIndex].options=Array.isArray(next)?next:[];
+                  syncRuleRows();
+                  renderRuleRows();
+                }
+              });
+            };
+
+            const delRule=document.createElement('button');
+            delRule.type='button';
+            delRule.className='btn btn-danger dependent-builder-remove';
+            delRule.textContent='-';
+            delRule.onclick=(ev)=>{
+              ev.preventDefault();
+              ruleRows.splice(rowIndex,1);
+              if(!ruleRows.length)ruleRows.push({key:'',options:[]});
+              syncRuleRows();
+              renderRuleRows();
+            };
+            row.appendChild(parentValue);
+            row.appendChild(preview);
+            row.appendChild(editList);
+            row.appendChild(delRule);
+            mapBox.appendChild(row);
+          });
+        };
+
+        btnAddRule.onclick=(ev)=>{
+          ev.preventDefault();
+          ruleRows.push({key:'',options:[]});
+          renderRuleRows();
+        };
+
+        renderRuleRows();
+        syncRuleRows();
+
+        const helpMap=document.createElement('small');
+        helpMap.className='field-help';
+        helpMap.textContent='Для каждого значения первого списка задайте свой набор второго.';
+
+        wOptionsMap.appendChild(parentList);
+        wOptionsMap.appendChild(capOptionsMap);
+        wOptionsMap.appendChild(mapBox);
+        wOptionsMap.appendChild(mapActions);
+        if(parsedRules.error){
+          const warn=document.createElement('small');
+          warn.className='field-help';
+          warn.textContent=`Обнаружены старые данные: ${parsedRules.error}`;
+          wOptionsMap.appendChild(warn);
+        }
+        wOptionsMap.appendChild(helpMap);
+        fs.appendChild(wOptionsMap);
+
+        const wFallbackToggle=fieldWrap(true);
+        const inlFallbackToggle=document.createElement('span');inlFallbackToggle.className='field-inline';
+        const inFallbackToggle=document.createElement('input');
+        inFallbackToggle.type='checkbox';
+        inFallbackToggle.checked=f.fallback_on_missing!==false;
+        inFallbackToggle.onchange=(ev)=>{f.fallback_on_missing=!!ev.target.checked;renderInputFields();};
+        const txtFallbackToggle=document.createElement('span');
+        txtFallbackToggle.textContent='Использовать запасной список, если правило не найдено';
+        inlFallbackToggle.appendChild(inFallbackToggle);
+        inlFallbackToggle.appendChild(txtFallbackToggle);
+        wFallbackToggle.appendChild(inlFallbackToggle);
+        fs.appendChild(wFallbackToggle);
+
+        if(f.fallback_on_missing!==false){
+          const wFallbackList=buildListEditorRow(
+            'Запасной список',
+            parseInputOptions(f.options),
+            (next)=>{f.options=stringifyInputOptions(next);},
+            'Этот список используется, если для значения родителя нет отдельного правила.'
+          );
+          fs.appendChild(wFallbackList);
+        }
+      }
     }
 
     const wRequired=fieldWrap(true);
@@ -1611,6 +2362,11 @@ function validateDraft(){
   const normalizedInputs=state.draft.inputFields.map(normInputField);
   state.draft.inputFields=normalizedInputs;
   const inputFieldIds=normalizedInputs.map(field=>field.id);
+  const cyclicFieldId=findInputDependencyCycle(normalizedInputs);
+  if(cyclicFieldId){
+    const cyclicIndex=normalizedInputs.findIndex(field=>field.id===cyclicFieldId);
+    return `${inputFieldLabel(normalizedInputs[Math.max(0,cyclicIndex)],Math.max(0,cyclicIndex))}: обнаружена циклическая зависимость списков.`;
+  }
   for(let i=0;i<state.draft.actions.length;i++){
     const a=normAction(state.draft.actions[i]);state.draft.actions[i]=a;if(!schema[a.type])return `Шаг ${i+1}: неизвестный тип действия.`;
     for(const f of schema[a.type].f||[]){if(!f.r||f.t==='check')continue;const v=a[f.k];if(v==null||String(v).trim()==='')return `Шаг ${i+1} (${schema[a.type].label}): заполните поле «${f.l}».`;}
@@ -1625,7 +2381,24 @@ function validateDraft(){
     const field=normalizedInputs[i];
     const label=inputFieldLabel(field,i);
     if(!field.name)return `Поле ввода ${i+1}: укажите название.`;
-    if(field.input_type==='select'&&!parseInputOptions(field.options).length)return `${label}: добавьте хотя бы один вариант списка.`;
+    if(field.input_type==='select'){
+      const baseOptions=parseInputOptions(field.options);
+      const parentId=String(field.depends_on||'').trim();
+      if(parentId){
+        if(parentId===field.id)return `${label}: поле не может зависеть от самого себя.`;
+        if(field.multiple)return `${label}: зависимый список не поддерживает множественный ввод.`;
+        const parent=normalizedInputs.find(item=>item.id===parentId);
+        if(!parent)return `${label}: поле-источник списка не найдено.`;
+        if(parent.input_type!=='select')return `${label}: поле-источник должно быть типа «Список».`;
+        if(parent.multiple)return `${label}: поле-источник не должно быть множественным.`;
+        const optionsMap=parseDependentOptionsMap(field.options_map);
+        if(optionsMap.error)return `${label}: ${optionsMap.error}`;
+        const hasFallback=(field.fallback_on_missing!==false)&&baseOptions.length>0;
+        if(optionsMap.valuesCount===0&&!hasFallback)return `${label}: добавьте зависимые правила или включите запасной список.`;
+      }else if(!baseOptions.length){
+        return `${label}: добавьте хотя бы один вариант списка.`;
+      }
+    }
     if(field.mode==='cells'){
       if(field.binding_mode==='named'){
         const names=parseNamedTargets(field.named_targets);
@@ -1687,7 +2460,16 @@ async function saveDraft(){
     state.draft.templatePath=preparedPath;
     els.tpl.value=preparedPath;
     const s={id:state.draft.id,name:state.draft.name,description:state.draft.description,templatePath:state.draft.templatePath,actions:state.draft.actions.map(normAction),inputFields:(state.draft.inputFields||[]).map(normInputField),createdAt:state.draft.createdAt||new Date().toISOString(),updatedAt:new Date().toISOString(),lastRunAt:state.draft.lastRunAt||null};
-    const idx=state.scenarios.findIndex(x=>x.id===s.id);if(idx>=0){state.scenarios[idx]=s;toast('Сценарий обновлен.','ok');}else{state.scenarios.push(s);toast('Сценарий создан.','ok');}
+    const idx=state.scenarios.findIndex(x=>x.id===s.id);
+    if(idx>=0){
+      if(String(state.scenarios[idx].name||'')!==String(s.name||''))delete state.scenarioFiles[s.id];
+      state.scenarios[idx]=s;
+      toast('Сценарий обновлен.','ok');
+    }else{
+      state.scenarios.push(s);
+      delete state.scenarioFiles[s.id];
+      toast('Сценарий создан.','ok');
+    }
     save();renderList();closeModal();
   }catch(e){
     toast(`Не удалось подготовить шаблон: ${dbReason(e)}`,'error');
@@ -1743,6 +2525,7 @@ function bindDirectNative(){
     if(!sdk||typeof sdk.on!=='function')return false;
     sdk.on('on_native_message',(cmd,param)=>{
       const c=String(cmd||'').trim();
+      if(c==='reports:fileResult'){onNativeFileResult(param);return;}
       if(c==='docbuilder:result'||c==='docbuilder:probeResult'){const data=parseNativeParam(param);if(data)onDbResult(data);return;}
       if(c==='files:checked'){handleFilesChecked(param);}
     });
@@ -1806,8 +2589,26 @@ function onDbResult(raw){
 async function ensureProbe(force){if(!force&&state.probe&&Date.now()-state.probe.ts<PROBE_TTL)return state.probe.data;const r=await probeDb({});if(!r||!r.ok)throw dbErr(r||{error:'runtime_not_found'});state.probe={ts:Date.now(),data:r};return r;}
 
 function openResult(path,scenarioId){
-  const typeId=extType(path);
-  post({event:'reportsOpenFile',source:'reports-ui',data:{id:null,path,typeId}});
+  const fullPath=normSlashes(path);
+  let sentNative=false;
+  try{
+    const sdk=window.parent&&window.parent.sdk;
+    if(bindDirectNative()&&sdk&&typeof sdk.command==='function'){
+      const payload={requestId:reqId('docbuilder-open'),path:fullPath};
+      sdk.command('docbuilder:open',JSON.stringify(payload));
+      sentNative=true;
+    }
+  }catch(_){ }
+  if(sentNative){
+    // Подстраховка: часть сборок не отдает openResult, поэтому дублируем старый канал.
+    setTimeout(()=>{
+      const typeId=extType(fullPath);
+      post({event:'reportsOpenFile',source:'reports-ui',data:{id:null,path:fullPath,typeId}});
+    },220);
+    return;
+  }
+  const typeId=extType(fullPath);
+  post({event:'reportsOpenFile',source:'reports-ui',data:{id:null,path:fullPath,typeId}});
 }
 function openTemplateInEditor(id){
   const sc=state.scenarios.find(x=>x.id===id);
@@ -1827,39 +2628,276 @@ function closeRunInputModal(result){
   if(typeof ctx.resolve==='function')ctx.resolve(result);
 }
 
-function createRuntimeInputControl(field,initialValue){
+function closeListEditorModal(apply){
+  const ctx=state.listEditor;
+  if(!ctx)return;
+  const values=optionsFromLines(els.listEditorText?els.listEditorText.value:'');
+  state.listEditor=null;
+  if(els.listEditorModal)els.listEditorModal.classList.add('hidden');
+  if(els.listEditorText)els.listEditorText.value='';
+  if(apply&&typeof ctx.onApply==='function')ctx.onApply(values);
+}
+
+function openListEditor(cfg){
+  const settings=isObj(cfg)?cfg:{};
+  const values=Array.isArray(settings.values)?settings.values:parseInputOptions(settings.values);
+  state.listEditor={onApply:typeof settings.onApply==='function'?settings.onApply:null};
+  if(els.listEditorTitle)els.listEditorTitle.textContent=String(settings.title||'Редактор списка');
+  if(els.listEditorSubtitle)els.listEditorSubtitle.textContent=String(settings.subtitle||'Каждый вариант вводится с новой строки.');
+  if(els.listEditorText)els.listEditorText.value=optionsToLines(values);
+  if(els.listEditorModal)els.listEditorModal.classList.remove('hidden');
+  if(els.listEditorText)setTimeout(()=>els.listEditorText.focus(),20);
+}
+
+function closeExportPackModal(){
+  state.exportPack=null;
+  if(els.exportPackModal)els.exportPackModal.classList.add('hidden');
+  if(els.exportPackList)els.exportPackList.innerHTML='';
+}
+function renderExportPackList(){
+  if(!els.exportPackList||!state.exportPack)return;
+  els.exportPackList.innerHTML='';
+  state.scenarios.forEach(sc=>{
+    const row=document.createElement('div');
+    row.className='export-pack-item';
+    const label=document.createElement('label');
+    const checkbox=document.createElement('input');
+    checkbox.type='checkbox';
+    checkbox.checked=!!state.exportPack.selected[sc.id];
+    checkbox.onchange=(ev)=>{state.exportPack.selected[sc.id]=!!ev.target.checked;};
+    const main=document.createElement('div');
+    main.className='export-pack-item-main';
+    const name=document.createElement('div');
+    name.className='export-pack-item-name';
+    name.textContent=sc.name||'Без названия';
+    const meta=document.createElement('div');
+    meta.className='export-pack-item-meta';
+    meta.textContent=`Шаблон: ${baseName(resolveTemplate(sc.templatePath)||'')||'-'}`;
+    main.appendChild(name);
+    main.appendChild(meta);
+    label.appendChild(checkbox);
+    label.appendChild(main);
+    row.appendChild(label);
+    els.exportPackList.appendChild(row);
+  });
+}
+function openExportPackModal(){
+  if(!state.scenarios.length){
+    toast('Нет сценариев для экспорта.','error');
+    return;
+  }
+  const selected=Object.create(null);
+  state.scenarios.forEach(sc=>{selected[sc.id]=true;});
+  state.exportPack={selected};
+  renderExportPackList();
+  if(els.exportPackModal)els.exportPackModal.classList.remove('hidden');
+}
+function filePathToUrl(path){
+  const p=normSlashes(path||'');
+  if(!p)return '';
+  let out=p.replace(/\\/g,'/');
+  if(!/^\//.test(out))out=`/${out}`;
+  return `file://${encodeURI(out)}`;
+}
+function bytesToBase64(bytes){
+  const chunk=0x8000;
+  let out='';
+  for(let i=0;i<bytes.length;i+=chunk){
+    const slice=bytes.subarray(i,Math.min(i+chunk,bytes.length));
+    out+=String.fromCharCode.apply(null,slice);
+  }
+  return btoa(out);
+}
+async function readBase64ViaFetch(path){
+  const url=filePathToUrl(path);
+  if(!url)throw new Error('invalid_path');
+  const res=await fetch(url);
+  if(!res||!res.ok)throw new Error('fetch_failed');
+  const ab=await res.arrayBuffer();
+  return bytesToBase64(new Uint8Array(ab));
+}
+async function readFileAsBase64(path){
+  const req={path:String(path||''),encoding:'base64'};
+  const res=await requestNativeFile('reports:fileRead',req,8000).catch(()=>null);
+  if(res&&res.ok&&String(res.encoding||'').toLowerCase()==='base64')return String(res.content||'');
+  return readBase64ViaFetch(path);
+}
+async function writeFileFromBase64(path,base64){
+  const req={path:String(path||''),encoding:'base64',content:String(base64||'')};
+  const res=await requestNativeFile('reports:fileWrite',req,10000);
+  if(res&&res.ok&&String(res.encoding||'').toLowerCase()==='base64')return true;
+  throw new Error('binary_write_not_supported');
+}
+function downloadTextFile(fileName,content){
+  const blob=new Blob([String(content||'')],{type:'application/json;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download=fileName;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},500);
+}
+function ensureTemplateFileName(name,used){
+  let base=sanitizeTemplateName(name||'Шаблон');
+  let candidate=`${base}.xlsx`;
+  let i=2;
+  while(used[candidate.toLowerCase()]){
+    candidate=`${base} (${i}).xlsx`;
+    i+=1;
+  }
+  used[candidate.toLowerCase()]=true;
+  return candidate;
+}
+async function submitExportPack(){
+  if(!state.exportPack)return;
+  const selectedIds=Object.keys(state.exportPack.selected).filter(id=>state.exportPack.selected[id]);
+  if(!selectedIds.length){
+    toast('Выберите хотя бы один сценарий.','error');
+    return;
+  }
+  try{
+    if(els.btnExportPackSubmit){els.btnExportPackSubmit.disabled=true;els.btnExportPackSubmit.textContent='Экспорт...';}
+    const usedTemplateNames=Object.create(null);
+    const items=[];
+    for(let i=0;i<selectedIds.length;i+=1){
+      const sc=state.scenarios.find(x=>x.id===selectedIds[i]);
+      if(!sc)continue;
+      const templatePath=resolveTemplate(sc.templatePath);
+      if(!templatePath)throw new Error(`Сценарий «${sc.name}»: не найден путь к шаблону.`);
+      const templateName=ensureTemplateFileName(baseName(templatePath)||sc.name,usedTemplateNames);
+      const templateBase64=await readFileAsBase64(templatePath);
+      const scenarioFile=state.scenarioFiles[sc.id]||makeScenarioFileName(sc.name);
+      items.push({
+        scenarioFile,
+        templateFile:templateName,
+        scenario:clone(sc),
+        templateBase64
+      });
+    }
+    const pack={
+      kind:'reports-ui-pack',
+      version:1,
+      exportedAt:new Date().toISOString(),
+      items
+    };
+    downloadTextFile(`reports_pack_${fmtStamp()}.reportspack.json`,JSON.stringify(pack,null,2));
+    closeExportPackModal();
+    toast('Экспорт выполнен.','ok');
+  }catch(err){
+    const msg=err&&err.message?err.message:'Ошибка экспорта';
+    toast(`Экспорт не выполнен: ${msg}`,'error');
+  }finally{
+    if(els.btnExportPackSubmit){els.btnExportPackSubmit.disabled=false;els.btnExportPackSubmit.textContent='Готово';}
+  }
+}
+async function importPackFromText(rawText){
+  const pack=parse(rawText);
+  if(!isObj(pack)||String(pack.kind||'')!=='reports-ui-pack'||!Array.isArray(pack.items))throw new Error('Неверный формат архива.');
+  const usedScenarioFileNames=Object.create(null);
+  Object.keys(state.scenarioFiles).forEach(id=>{const file=String(state.scenarioFiles[id]||'').trim();if(file)usedScenarioFileNames[file.toLowerCase()]=true;});
+  const usedTemplateNames=Object.create(null);
+  state.scenarios.forEach(sc=>{const tpl=baseName(resolveTemplate(sc.templatePath)||'').toLowerCase();if(tpl)usedTemplateNames[tpl]=true;});
+  const pendingScenarios=[];
+  for(let i=0;i<pack.items.length;i+=1){
+    const item=pack.items[i];
+    if(!isObj(item)||!isObj(item.scenario))continue;
+    const sc=normScenario(item.scenario);
+    if(!sc)continue;
+    const templateFile=ensureTemplateFileName(item.templateFile||sc.name,usedTemplateNames);
+    const templatePath=joinPath(getTemplatesDir(),templateFile);
+    await writeFileFromBase64(templatePath,String(item.templateBase64||''));
+    sc.templatePath=templatePath;
+    const scenarioFile=ensureScenarioFileNameUniq(item.scenarioFile||makeScenarioFileName(sc.name),usedScenarioFileNames);
+    pendingScenarios.push({scenario:sc,scenarioFile});
+  }
+  pendingScenarios.forEach(entry=>{
+    const idx=state.scenarios.findIndex(x=>x.id===entry.scenario.id);
+    if(idx>=0)state.scenarios[idx]=entry.scenario;
+    else state.scenarios.push(entry.scenario);
+    state.scenarioFiles[entry.scenario.id]=entry.scenarioFile;
+  });
+  save();
+  renderList();
+}
+async function onImportPackPicked(file){
+  if(!file)return;
+  const text=await file.text();
+  await importPackFromText(text);
+}
+
+function createRuntimeInputControl(field,initialValue,selectOptions){
   const type=normalizeInputType(field.input_type);
   if(type==='multiline'){
     const ta=document.createElement('textarea');
     ta.rows=3;
     ta.value=String(initialValue==null?'':initialValue);
     ta.placeholder=field.placeholder||'Введите значение';
-    return {node:ta,getValue:()=>String(ta.value==null?'':ta.value),focus:()=>ta.focus()};
+    return {
+      node:ta,
+      getValue:()=>String(ta.value==null?'':ta.value),
+      focus:()=>ta.focus(),
+      onChange:(fn)=>{if(typeof fn==='function')ta.addEventListener('input',()=>fn(String(ta.value==null?'':ta.value)));},
+      setDisabled:(flag)=>{ta.disabled=!!flag;}
+    };
   }
   if(type==='select'){
     const sel=document.createElement('select');
-    const options=parseInputOptions(field.options);
-    if(!field.required){
-      const empty=document.createElement('option');
-      empty.value='';
-      empty.textContent='(пусто)';
-      sel.appendChild(empty);
-    }
-    options.forEach(opt=>{
-      const o=document.createElement('option');
-      o.value=opt;
-      o.textContent=opt;
-      sel.appendChild(o);
-    });
-    const start=String(initialValue==null?'':initialValue);
-    if(start&&options.indexOf(start)<0){
-      const extra=document.createElement('option');
-      extra.value=start;
-      extra.textContent=start;
-      sel.insertBefore(extra,sel.firstChild);
-    }
-    sel.value=start;
-    return {node:sel,getValue:()=>String(sel.value==null?'':sel.value),focus:()=>sel.focus()};
+    const fillOptions=(options,preferValue,keepCurrent)=>{
+      const current=String(sel.value==null?'':sel.value);
+      const list=[];
+      const seen=Object.create(null);
+      (Array.isArray(options)?options:[]).forEach(item=>{
+        const value=String(item==null?'':item).trim();
+        if(!value)return;
+        const key=value.toLowerCase();
+        if(seen[key])return;
+        seen[key]=true;
+        list.push(value);
+      });
+      while(sel.firstChild)sel.removeChild(sel.firstChild);
+      if(!field.required){
+        const empty=document.createElement('option');
+        empty.value='';
+        empty.textContent='(пусто)';
+        sel.appendChild(empty);
+      }
+      list.forEach(opt=>{
+        const o=document.createElement('option');
+        o.value=opt;
+        o.textContent=opt;
+        sel.appendChild(o);
+      });
+      const wanted=String(preferValue==null?'':preferValue).trim();
+      if(wanted&&list.indexOf(wanted)<0){
+        const extra=document.createElement('option');
+        extra.value=wanted;
+        extra.textContent=wanted;
+        sel.insertBefore(extra,sel.firstChild);
+      }
+      const nextCurrent=keepCurrent?current:'';
+      if(wanted){
+        sel.value=wanted;
+      }else if(nextCurrent&&list.indexOf(nextCurrent)>=0){
+        sel.value=nextCurrent;
+      }else if(!field.required){
+        sel.value='';
+      }else if(list.length){
+        sel.value=list[0];
+      }else{
+        sel.value='';
+      }
+    };
+    const initialOptions=Array.isArray(selectOptions)?selectOptions:resolveSelectOptions(field,'');
+    fillOptions(initialOptions,initialValue,false);
+    return {
+      node:sel,
+      getValue:()=>String(sel.value==null?'':sel.value),
+      focus:()=>sel.focus(),
+      setOptions:(options)=>fillOptions(options,'',true),
+      setDisabled:(flag)=>{sel.disabled=!!flag;},
+      onChange:(fn)=>{if(typeof fn==='function')sel.addEventListener('change',()=>fn(String(sel.value==null?'':sel.value)));}
+    };
   }
   if(type==='boolean'){
     const wrap=document.createElement('label');
@@ -1871,7 +2909,13 @@ function createRuntimeInputControl(field,initialValue){
     txt.textContent=field.placeholder||'Да';
     wrap.appendChild(chk);
     wrap.appendChild(txt);
-    return {node:wrap,getValue:()=>!!chk.checked,focus:()=>chk.focus()};
+    return {
+      node:wrap,
+      getValue:()=>!!chk.checked,
+      focus:()=>chk.focus(),
+      onChange:(fn)=>{if(typeof fn==='function')chk.addEventListener('change',()=>fn(!!chk.checked));},
+      setDisabled:(flag)=>{chk.disabled=!!flag;}
+    };
   }
   const inp=document.createElement('input');
   if(type==='number'){
@@ -1887,10 +2931,16 @@ function createRuntimeInputControl(field,initialValue){
     inp.value=String(initialValue==null?'':initialValue);
   }
   inp.placeholder=field.placeholder||'Введите значение';
-  return {node:inp,getValue:()=>inp.value,focus:()=>inp.focus()};
+  return {
+    node:inp,
+    getValue:()=>inp.value,
+    focus:()=>inp.focus(),
+    onChange:(fn)=>{if(typeof fn==='function')inp.addEventListener('input',()=>fn(inp.value));},
+    setDisabled:(flag)=>{inp.disabled=!!flag;}
+  };
 }
 
-function createRuntimeFieldControl(field){
+function createRuntimeFieldControl(field,selectOptions){
   if(field.multiple){
     const box=document.createElement('div');
     box.className='runtime-multi-box';
@@ -1909,7 +2959,7 @@ function createRuntimeFieldControl(field){
     const makeRow=(value)=>{
       const row=document.createElement('div');
       row.className='runtime-multi-row';
-      const ctrl=createRuntimeInputControl(field,value);
+      const ctrl=createRuntimeInputControl(field,value,selectOptions);
       const delBtn=document.createElement('button');
       delBtn.type='button';
       delBtn.className='btn btn-danger runtime-multi-remove';
@@ -1935,11 +2985,25 @@ function createRuntimeFieldControl(field){
     return {
       node:box,
       getValue:()=>items.map(item=>normalizeScalarFieldValue(item.ctrl.getValue(),field.input_type)),
-      focus:()=>{if(items.length&&items[0].ctrl&&typeof items[0].ctrl.focus==='function')items[0].ctrl.focus();}
+      focus:()=>{if(items.length&&items[0].ctrl&&typeof items[0].ctrl.focus==='function')items[0].ctrl.focus();},
+      setDisabled:(flag)=>{
+        addBtn.disabled=!!flag;
+        items.forEach(item=>{
+          if(item&&item.ctrl&&typeof item.ctrl.setDisabled==='function')item.ctrl.setDisabled(!!flag);
+          if(item&&item.delBtn)item.delBtn.disabled=!!flag;
+        });
+      }
     };
   }
-  const ctrl=createRuntimeInputControl(field,normalizeScalarFieldValue(field.default_value,field.input_type));
-  return {node:ctrl.node,getValue:()=>normalizeScalarFieldValue(ctrl.getValue(),field.input_type),focus:ctrl.focus};
+  const ctrl=createRuntimeInputControl(field,normalizeScalarFieldValue(field.default_value,field.input_type),selectOptions);
+  return {
+    node:ctrl.node,
+    getValue:()=>normalizeScalarFieldValue(ctrl.getValue(),field.input_type),
+    focus:ctrl.focus,
+    onChange:ctrl.onChange,
+    setOptions:ctrl.setOptions,
+    setDisabled:ctrl.setDisabled
+  };
 }
 
 function submitRunInputModal(){
@@ -1981,35 +3045,81 @@ function openRunInputModal(sc){
   if(!fields.length)return Promise.resolve({});
   return new Promise(resolve=>{
     const inputs=Object.create(null);
+    const fieldsById=Object.create(null);
+    const childrenByParent=Object.create(null);
+    fields.forEach(field=>{
+      fieldsById[field.id]=field;
+      const parentId=String(field.depends_on||'').trim();
+      if(field.input_type==='select'&&parentId){
+        if(!Array.isArray(childrenByParent[parentId]))childrenByParent[parentId]=[];
+        childrenByParent[parentId].push(field.id);
+      }
+    });
     state.runInput={resolve,scenarioId:sc.id,fields,inputs};
     renderList();
     if(els.runInputTitle)els.runInputTitle.textContent=`Заполнение: ${sc.name}`;
     if(els.runInputFields){
       els.runInputFields.innerHTML='';
       fields.forEach((field,i)=>{
-        const wrap=fieldWrap(true);
-        const cap=document.createElement('span');
-        cap.textContent=field.required?`${inputFieldLabel(field,i)} *`:inputFieldLabel(field,i);
-        const ctrl=createRuntimeFieldControl(field);
-        inputs[field.id]=ctrl;
-        wrap.appendChild(cap);
-        wrap.appendChild(ctrl.node);
-        if(field.mode==='cells'){
-          const hint=document.createElement('small');
-          hint.className='field-help';
-          if(field.binding_mode==='named')hint.textContent=`Вставка в именованные диапазоны: ${field.named_targets||'-'}`;
-          else if(field.multiple)hint.textContent=`Вставка в: ${field.targets||'-'} (${field.multiple_direction==='columns'?'по столбцам':'по строкам'}${field.multiple_insert?', с добавлением':''})`;
-          else hint.textContent=`Вставка в: ${field.targets||'-'}`;
-          wrap.appendChild(hint);
-        }else{
-          const hint=document.createElement('small');
-          hint.className='field-help';
-          hint.textContent=field.scope==='sheets'?`Ключ ${field.token||'-'} (листы: ${field.sheets||'-'})`:`Ключ ${field.token||'-'} (во всей книге)`;
-          wrap.appendChild(hint);
+        const wrap=document.createElement('div');
+        wrap.className='run-input-row';
+        const cap=document.createElement('label');
+        cap.className='run-input-label';
+        cap.textContent=`${inputFieldLabel(field,i)}:`;
+        const parentId=String(field.depends_on||'').trim();
+        let selectOptions;
+        if(field.input_type==='select'&&parentId){
+          const parentField=fieldsById[parentId];
+          const parentInitial=parentField?normalizeScalarFieldValue(parentField.default_value,parentField.input_type):'';
+          selectOptions=resolveSelectOptions(field,parentInitial);
         }
+        const ctrl=createRuntimeFieldControl(field,selectOptions);
+        inputs[field.id]=ctrl;
+        const ctrlWrap=document.createElement('div');
+        ctrlWrap.className='run-input-control';
+        wrap.appendChild(cap);
+        ctrlWrap.appendChild(ctrl.node);
+        wrap.appendChild(ctrlWrap);
         els.runInputFields.appendChild(wrap);
       });
     }
+
+    const refreshDependentField=(fieldId,stack)=>{
+      const field=fieldsById[fieldId];
+      if(!field)return;
+      const parentId=String(field.depends_on||'').trim();
+      if(!parentId)return;
+      if(stack&&stack[fieldId])return;
+      const nextStack=stack||Object.create(null);
+      nextStack[fieldId]=true;
+      const parentCtrl=inputs[parentId];
+      const ctrl=inputs[fieldId];
+      if(parentCtrl&&ctrl&&typeof ctrl.setOptions==='function'){
+        const parentValue=parentCtrl.getValue();
+        const options=resolveSelectOptions(field,parentValue);
+        ctrl.setOptions(options);
+        if(typeof ctrl.setDisabled==='function')ctrl.setDisabled(options.length===0);
+      }
+      const children=childrenByParent[fieldId];
+      if(Array.isArray(children)){
+        children.forEach(childId=>refreshDependentField(childId,nextStack));
+      }
+      delete nextStack[fieldId];
+    };
+    Object.keys(childrenByParent).forEach(parentId=>{
+      const parentCtrl=inputs[parentId];
+      if(!parentCtrl||typeof parentCtrl.onChange!=='function')return;
+      parentCtrl.onChange(()=>{
+        const children=childrenByParent[parentId];
+        if(!Array.isArray(children))return;
+        children.forEach(childId=>refreshDependentField(childId,Object.create(null)));
+      });
+      const children=childrenByParent[parentId];
+      if(Array.isArray(children)){
+        children.forEach(childId=>refreshDependentField(childId,Object.create(null)));
+      }
+    });
+
     if(els.runInputModal)els.runInputModal.classList.remove('hidden');
     const first=fields.length&&inputs[fields[0].id];
     if(first&&typeof first.focus==='function')setTimeout(()=>first.focus(),10);
@@ -2218,23 +3328,62 @@ function bind(){
   bindDirectNative();
   els.search&&els.search.addEventListener('input',e=>{state.q=e.target.value||'';renderList();});
   els.btnCreate&&els.btnCreate.addEventListener('click',()=>openModal(null));
+  els.btnExportPack&&els.btnExportPack.addEventListener('click',openExportPackModal);
+  els.btnImportPack&&els.btnImportPack.addEventListener('click',()=>{if(els.importPackInput){els.importPackInput.value='';els.importPackInput.click();}});
+  els.importPackInput&&els.importPackInput.addEventListener('change',async()=>{
+    const f=els.importPackInput.files&&els.importPackInput.files[0];
+    if(!f)return;
+    try{
+      toast('Импорт сценариев...','ok');
+      await onImportPackPicked(f);
+      toast('Импорт выполнен.','ok');
+    }catch(err){
+      const msg=err&&err.message?err.message:'Ошибка импорта';
+      toast(`Импорт не выполнен: ${msg}`,'error');
+    }finally{
+      if(els.importPackInput)els.importPackInput.value='';
+    }
+  });
   els.btnClose&&els.btnClose.addEventListener('click',closeModal);
   els.btnCancel&&els.btnCancel.addEventListener('click',closeModal);
   els.btnSave&&els.btnSave.addEventListener('click',saveDraft);
-  els.btnAddInputField&&els.btnAddInputField.addEventListener('click',()=>{if(!state.draft)return;state.draft.inputFields.push(mkInputField());renderInputFields();});
-  els.btnAddAction&&els.btnAddAction.addEventListener('click',()=>{if(!state.draft)return;state.draft.actions.push(mkAction('set_cell_value'));renderActions();});
+  const addInputField=()=>{if(!state.draft)return;state.draft.inputFields.push(mkInputField());renderInputFields();};
+  const addAction=()=>{if(!state.draft)return;state.draft.actions.push(mkAction('set_cell_value'));renderActions();};
+  els.btnAddInputField&&els.btnAddInputField.addEventListener('click',addInputField);
+  els.btnAddInputFieldBottom&&els.btnAddInputFieldBottom.addEventListener('click',addInputField);
+  els.btnAddAction&&els.btnAddAction.addEventListener('click',addAction);
+  els.btnAddActionBottom&&els.btnAddActionBottom.addEventListener('click',addAction);
+  els.btnToggleInputSection&&els.btnToggleInputSection.addEventListener('click',()=>toggleSection('input'));
+  els.btnToggleActionSection&&els.btnToggleActionSection.addEventListener('click',()=>toggleSection('action'));
   els.btnPick&&els.btnPick.addEventListener('click',pickTemplate);
   els.btnRunInputCancel&&els.btnRunInputCancel.addEventListener('click',()=>closeRunInputModal(null));
   els.btnRunInputSubmit&&els.btnRunInputSubmit.addEventListener('click',submitRunInputModal);
+  els.btnListEditorClose&&els.btnListEditorClose.addEventListener('click',()=>closeListEditorModal(false));
+  els.btnListEditorCancel&&els.btnListEditorCancel.addEventListener('click',()=>closeListEditorModal(false));
+  els.btnListEditorApply&&els.btnListEditorApply.addEventListener('click',()=>closeListEditorModal(true));
+  els.btnExportPackClose&&els.btnExportPackClose.addEventListener('click',closeExportPackModal);
+  els.btnExportPackCancel&&els.btnExportPackCancel.addEventListener('click',closeExportPackModal);
+  els.btnExportPackSubmit&&els.btnExportPackSubmit.addEventListener('click',submitExportPack);
   els.file&&els.file.addEventListener('change',()=>{const f=els.file.files&&els.file.files[0];if(f&&f.path){els.tpl.value=toFsPath(f.path);if(state.draft)state.draft.templatePath=els.tpl.value;return;}const v=els.file.value||'';if(v&&!/fakepath/i.test(v)){els.tpl.value=toFsPath(v);if(state.draft)state.draft.templatePath=els.tpl.value;return;}toast('Введите полный путь к шаблону вручную.','error');});
   els.modal&&els.modal.addEventListener('click',e=>{if(e.target&&e.target.classList&&e.target.classList.contains('modal-backdrop'))closeModal();});
   els.runInputModal&&els.runInputModal.addEventListener('click',e=>{if(e.target&&e.target.classList&&e.target.classList.contains('modal-backdrop'))closeRunInputModal(null);});
+  els.listEditorModal&&els.listEditorModal.addEventListener('click',e=>{if(e.target&&e.target.classList&&e.target.classList.contains('modal-backdrop'))closeListEditorModal(false);});
+  els.exportPackModal&&els.exportPackModal.addEventListener('click',e=>{if(e.target&&e.target.classList&&e.target.classList.contains('modal-backdrop'))closeExportPackModal();});
   document.addEventListener('click',()=>closeColorMenus());
   document.addEventListener('keydown',e=>{
     if(e.key==='Escape'){
+      if(els.listEditorModal&&!els.listEditorModal.classList.contains('hidden')){closeListEditorModal(false);return;}
+      if(els.exportPackModal&&!els.exportPackModal.classList.contains('hidden')){closeExportPackModal();return;}
       closeColorMenus();
       if(els.runInputModal&&!els.runInputModal.classList.contains('hidden')){closeRunInputModal(null);return;}
       if(els.modal&&!els.modal.classList.contains('hidden'))closeModal();
+      return;
+    }
+    if((e.key==='Enter'||e.keyCode===13)&&els.listEditorModal&&!els.listEditorModal.classList.contains('hidden')){
+      if(e.ctrlKey||e.metaKey){
+        e.preventDefault();
+        closeListEditorModal(true);
+      }
       return;
     }
     if((e.key==='Enter'||e.keyCode===13)&&els.runInputModal&&!els.runInputModal.classList.contains('hidden')){
@@ -2254,6 +3403,14 @@ function bind(){
   });
 }
 
-function init(){bindThemeSync();load();bind();renderList();window.ReportsDocBuilder={run:runDb,probe:probeDb};}
-init();
+async function init(){
+  bindThemeSync();
+  bindDirectNative();
+  await load();
+  bind();
+  syncSectionCollapseUi();
+  renderList();
+  window.ReportsDocBuilder={run:runDb,probe:probeDb};
+}
+init().catch(()=>{bind();syncSectionCollapseUi();renderList();});
 })();

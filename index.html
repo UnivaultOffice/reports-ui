@@ -18,7 +18,10 @@
         <div class="search-wrap">
           <input id="search-input" type="text" placeholder="Поиск сценариев" />
         </div>
+        <button id="btn-export-pack" class="btn btn-secondary" type="button">Экспорт</button>
+        <button id="btn-import-pack" class="btn btn-secondary" type="button">Импорт</button>
         <button id="btn-create" class="btn btn-primary" type="button">Создать</button>
+        <input id="import-pack-input" type="file" accept=".reportspack.json,.json" hidden />
       </div>
     </header>
 
@@ -67,19 +70,35 @@
       <section class="modal-section">
         <div class="section-head">
           <h3>Поля ввода перед запуском</h3>
-          <button id="btn-add-input-field" class="btn btn-secondary" type="button">Добавить поле</button>
+          <div class="section-actions">
+            <button id="btn-add-input-field" class="btn btn-secondary" type="button">Добавить поле</button>
+            <button id="btn-toggle-input-section" class="btn btn-ghost" type="button" aria-expanded="true">Свернуть</button>
+          </div>
         </div>
-        <p class="section-note">Если поля добавлены, перед запуском откроется форма ввода значений.</p>
-        <div id="input-field-list" class="input-field-list"></div>
+        <div id="input-section-body" class="section-body">
+          <p class="section-note">Если поля добавлены, перед запуском откроется форма ввода значений.</p>
+          <div id="input-field-list" class="input-field-list"></div>
+          <div class="section-tail">
+            <button id="btn-add-input-field-bottom" class="btn btn-secondary" type="button">Добавить поле</button>
+          </div>
+        </div>
       </section>
 
       <section class="modal-section">
         <div class="section-head">
           <h3>Действия сценария</h3>
-          <button id="btn-add-action" class="btn btn-secondary" type="button">Добавить действие</button>
+          <div class="section-actions">
+            <button id="btn-add-action" class="btn btn-secondary" type="button">Добавить действие</button>
+            <button id="btn-toggle-action-section" class="btn btn-ghost" type="button" aria-expanded="true">Свернуть</button>
+          </div>
         </div>
-        <p class="section-note">Порядок важен: действия выполняются сверху вниз. Порядок можно менять стрелками.</p>
-        <div id="action-list" class="action-list"></div>
+        <div id="action-section-body" class="section-body">
+          <p class="section-note">Порядок важен: действия выполняются сверху вниз. Порядок можно менять стрелками.</p>
+          <div id="action-list" class="action-list"></div>
+          <div class="section-tail">
+            <button id="btn-add-action-bottom" class="btn btn-secondary" type="button">Добавить действие</button>
+          </div>
+        </div>
       </section>
 
       <footer class="modal-footer">
@@ -91,7 +110,7 @@
 
   <div id="run-input-modal" class="modal hidden" role="dialog" aria-modal="true">
     <div class="modal-backdrop"></div>
-    <div class="modal-card modal-card-compact">
+    <div class="modal-card">
       <header class="modal-header">
         <div>
           <h2 id="run-input-title">Заполнение отчета</h2>
@@ -108,8 +127,52 @@
     </div>
   </div>
 
+  <div id="list-editor-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card modal-card-compact">
+      <header class="modal-header">
+        <div>
+          <h2 id="list-editor-title">Редактор списка</h2>
+          <p id="list-editor-subtitle" class="modal-subtitle">Каждый вариант вводится с новой строки.</p>
+        </div>
+        <button id="btn-list-editor-close" class="btn btn-ghost" type="button">Закрыть</button>
+      </header>
+      <section class="modal-section">
+        <label class="field field-full">
+          <span>Элементы списка</span>
+          <textarea id="list-editor-text" rows="12" placeholder="Каждый вариант с новой строки"></textarea>
+          <small class="field-help">Можно вставить список целиком: один элемент = одна строка.</small>
+        </label>
+      </section>
+      <footer class="modal-footer">
+        <button id="btn-list-editor-cancel" class="btn btn-ghost" type="button">Отмена</button>
+        <button id="btn-list-editor-apply" class="btn btn-primary" type="button">Применить</button>
+      </footer>
+    </div>
+  </div>
+
+  <div id="export-pack-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card modal-card-compact">
+      <header class="modal-header">
+        <div>
+          <h2>Экспорт сценариев</h2>
+          <p class="modal-subtitle">Выберите один или несколько сценариев для экспорта.</p>
+        </div>
+        <button id="btn-export-pack-close" class="btn btn-ghost" type="button">Закрыть</button>
+      </header>
+      <section class="modal-section">
+        <div id="export-pack-list" class="export-pack-list"></div>
+      </section>
+      <footer class="modal-footer">
+        <button id="btn-export-pack-cancel" class="btn btn-ghost" type="button">Отмена</button>
+        <button id="btn-export-pack-submit" class="btn btn-primary" type="button">Готово</button>
+      </footer>
+    </div>
+  </div>
+
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=20260217-09"></script>
+  <script src="app.js?v=20260218-02"></script>
 </body>
 </html>
