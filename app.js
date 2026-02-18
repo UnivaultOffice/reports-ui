@@ -11,11 +11,12 @@ const PROBE_TTL=60000;
 const PENDING=Object.create(null);
 const WATCH=Object.create(null);
 const FILE_PENDING=Object.create(null);
+const PICKER_PENDING=Object.create(null);
 const SCENARIO_TEMPLATE_EXT='xlsx';
 const GENERATED_DIR='generated';
 const THEME_IDS=['theme-light','theme-classic-light','theme-dark','theme-contrast-dark','theme-gray','theme-white','theme-night'];
 
-const state={scenarios:[],scenarioFiles:Object.create(null),persistScenariosPromise:Promise.resolve(),q:'',draft:null,running:null,probe:null,toastTimer:null,runInput:null,listEditor:null,exportPack:null,inputCollapsed:false,actionCollapsed:false,collapsedInputItems:Object.create(null),collapsedActionItems:Object.create(null),fileBridge:'unknown',fileSaveWarned:false};
+const state={scenarios:[],scenarioFiles:Object.create(null),persistScenariosPromise:Promise.resolve(),q:'',draft:null,running:null,probe:null,toastTimer:null,runInput:null,listEditor:null,exportPack:null,inputCollapsed:false,actionCollapsed:false,collapsedInputItems:Object.create(null),collapsedActionItems:Object.create(null),fileBridge:'unknown',fileSaveWarned:false,bindingPicker:null,bindingPickerDrag:null,bindingPickerPos:null};
 
 const schema={
   set_cell_value:{label:'Вставить значение',d:{sheet:'Лист1',range:'A1',mode:'text',value:'',merge:false,keep_template_format:true,apply_alignment:false,horizontal:'',vertical:'',wrap:false,apply_number_format:false,format_preset:'general',decimals:'2',use_thousands:false,currency_symbol:'₽',negative_red:false,custom_format:'General',format:'General',apply_font:false,font_name:'Arial',font_size:'11',bold:false,italic:false,underline:'none',strikeout:false,font_color:'auto',apply_fill:false,fill_color:'none'},f:[
@@ -219,7 +220,22 @@ const els={
   btnListEditorApply:document.getElementById('btn-list-editor-apply'),
   exportPackModal:document.getElementById('export-pack-modal'),exportPackList:document.getElementById('export-pack-list'),
   btnExportPackClose:document.getElementById('btn-export-pack-close'),btnExportPackCancel:document.getElementById('btn-export-pack-cancel'),
-  btnExportPackSubmit:document.getElementById('btn-export-pack-submit')
+  btnExportPackSubmit:document.getElementById('btn-export-pack-submit'),
+  bindingPicker:document.getElementById('binding-picker'),
+  bindingPickerHead:document.getElementById('binding-picker-head'),
+  bindingPickerTitle:document.getElementById('binding-picker-title'),
+  bindingPickerSubtitle:document.getElementById('binding-picker-subtitle'),
+  bindingPickerCurrent:document.getElementById('binding-picker-current'),
+  bindingPickerNamed:document.getElementById('binding-picker-named'),
+  bindingPickerNamedSelect:document.getElementById('binding-picker-named-select'),
+  bindingPickerList:document.getElementById('binding-picker-list'),
+  btnBindingOpenTemplate:document.getElementById('btn-binding-open-template'),
+  btnBindingClose:document.getElementById('btn-binding-close'),
+  btnBindingAddCurrent:document.getElementById('btn-binding-add-current'),
+  btnBindingAddNamed:document.getElementById('btn-binding-add-named'),
+  btnBindingRefresh:document.getElementById('btn-binding-refresh'),
+  btnBindingCancel:document.getElementById('btn-binding-cancel'),
+  btnBindingDone:document.getElementById('btn-binding-done')
 };
 
 function uid(p){return `${p}-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;}
@@ -1362,6 +1378,153 @@ function parseCellBindings(raw){
   if(!items.length)return {items:[],error:'Не удалось разобрать адреса.'};
   return {items,error:''};
 }
+function stringifyCellBindings(items){
+  const list=Array.isArray(items)?items:[];
+  const groups=[];
+  const bySheet=Object.create(null);
+  list.forEach(raw=>{
+    if(!raw)return;
+    const sheet=String(raw.sheet||'').trim();
+    const range=normalizePickerRange(raw.range||'');
+    if(!sheet||!range)return;
+    const key=sheet.toLowerCase();
+    if(!bySheet[key]){
+      bySheet[key]={sheet,ranges:[],seen:Object.create(null)};
+      groups.push(bySheet[key]);
+    }
+    const rangeKey=range.toLowerCase();
+    if(bySheet[key].seen[rangeKey])return;
+    bySheet[key].seen[rangeKey]=true;
+    bySheet[key].ranges.push(range);
+  });
+  return groups
+    .filter(group=>group.ranges.length>0)
+    .map(group=>`${group.sheet}:${group.ranges.join(',')}`)
+    .join('; ');
+}
+function parseCellBindingItemsSafe(raw){
+  const parsed=parseCellBindings(raw);
+  return parsed.error?[]:parsed.items;
+}
+function normalizePickerRange(raw){
+  let text=String(raw==null?'':raw).trim();
+  if(!text)return '';
+  text=text.replace(/^\=/,'').replace(/\$/g,'');
+  const bang=text.lastIndexOf('!');
+  if(bang>=0)text=text.slice(bang+1);
+  text=text.replace(/\s+/g,'').toUpperCase();
+  return text;
+}
+function normalizePickerSheet(raw){
+  return String(raw==null?'':raw).replace(/^'+|'+$/g,'').trim();
+}
+function parseRangeBounds(raw){
+  const text=normalizePickerRange(raw);
+  const a1=parseA1Range(text);
+  if(a1){
+    return {
+      range:formatA1Range(a1),
+      rowStart:a1.r1,
+      rowEnd:a1.r2,
+      colStart:numberToColLetters(a1.c1),
+      colEnd:numberToColLetters(a1.c2)
+    };
+  }
+  const row=text.match(/^(\d+):(\d+)$/);
+  if(row){
+    const r1=parseInt(row[1],10);
+    const r2=parseInt(row[2],10);
+    if(r1>0&&r2>0){
+      return {
+        range:`${Math.min(r1,r2)}:${Math.max(r1,r2)}`,
+        rowStart:Math.min(r1,r2),
+        rowEnd:Math.max(r1,r2),
+        colStart:'',
+        colEnd:''
+      };
+    }
+  }
+  const col=text.match(/^([A-Z]+):([A-Z]+)$/);
+  if(col){
+    const c1=colLettersToNumber(col[1]);
+    const c2=colLettersToNumber(col[2]);
+    if(c1>0&&c2>0){
+      return {
+        range:`${numberToColLetters(Math.min(c1,c2))}:${numberToColLetters(Math.max(c1,c2))}`,
+        rowStart:null,
+        rowEnd:null,
+        colStart:numberToColLetters(Math.min(c1,c2)),
+        colEnd:numberToColLetters(Math.max(c1,c2))
+      };
+    }
+  }
+  return null;
+}
+function pickerCellKey(item){
+  const sheet=normalizePickerSheet(item&&item.sheet||'');
+  const range=normalizePickerRange(item&&item.range||'');
+  if(!sheet||!range)return '';
+  return `${sheet.toLowerCase()}!${range.toLowerCase()}`;
+}
+function pickerNamedKey(name){
+  return String(name||'').trim().toLowerCase();
+}
+function pickerSheetKey(name){
+  return normalizePickerSheet(name).toLowerCase();
+}
+function formatPickerCellItem(item){
+  const sheet=normalizePickerSheet(item&&item.sheet||'');
+  const range=normalizePickerRange(item&&item.range||'');
+  return sheet&&range?`${sheet}:${range}`:'';
+}
+function parsePickerSelectionData(raw){
+  const obj=isObj(raw)?raw:{};
+  const selection=isObj(obj.selection)?obj.selection:{};
+  const sheet=normalizePickerSheet(selection.sheet||obj.sheet||'');
+  const ranges=[];
+  const addRange=(value)=>{
+    String(value==null?'':value).split(/[;,]+/).forEach(part=>{
+      const range=normalizePickerRange(part);
+      if(!range)return;
+      if(ranges.indexOf(range)>=0)return;
+      ranges.push(range);
+    });
+  };
+  if(Array.isArray(selection.ranges))selection.ranges.forEach(addRange);
+  addRange(selection.range||obj.range||'');
+  return {
+    sheet,
+    ranges,
+    isFocused:!!selection.isFocused,
+    docPath:String(selection.docPath||obj.docPath||''),
+    docName:String(selection.docName||obj.docName||'')
+  };
+}
+function normalizePickerNamedRanges(raw){
+  const src=Array.isArray(raw)?raw:[];
+  const out=[];
+  const seen=Object.create(null);
+  src.forEach(item=>{
+    const name=String(
+      isObj(item)
+        ?(item.name||item.Name||(typeof item.asc_getName==='function'?item.asc_getName():'')) 
+        :item
+    ).trim();
+    if(!name)return;
+    const key=name.toLowerCase();
+    if(seen[key])return;
+    seen[key]=true;
+    const ref=isObj(item)?String(item.ref||item.Ref||(typeof item.asc_getRef==='function'?item.asc_getRef():'')):''; 
+    const scope=isObj(item)?String(item.scope||item.scopeName||item.sheet||''):'';
+    out.push({name,ref,scope});
+  });
+  return out;
+}
+function getBindingPickerTemplatePath(){
+  if(state.bindingPicker&&state.bindingPicker.templatePath)return String(state.bindingPicker.templatePath||'');
+  if(state.draft&&state.draft.templatePath)return String(state.draft.templatePath||'');
+  return '';
+}
 
 function inputFieldLabel(field,index){
   const name=String(field&&field.name||'').trim();
@@ -1654,6 +1817,7 @@ function resetItemCollapsedState(){
 }
 
 function openModal(id){
+  closeBindingPicker(false);
   const src=state.scenarios.find(x=>x.id===id);
   state.draft=src?clone(src):{id:uid('scenario'),name:'',description:'',templatePath:'',actions:[],inputFields:[],createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),lastRunAt:null};
   resetItemCollapsedState();
@@ -1676,7 +1840,7 @@ function openModal(id){
   els.name.value=state.draft.name; els.tpl.value=state.draft.templatePath; els.descr.value=state.draft.description;
   renderInputFields(); renderActions(); syncSectionCollapseUi(); els.modal.classList.remove('hidden'); els.name.focus();
 }
-function closeModal(){els.modal.classList.add('hidden');state.draft=null;resetItemCollapsedState();}
+function closeModal(){closeBindingPicker(false);els.modal.classList.add('hidden');state.draft=null;resetItemCollapsedState();}
 
 function setSectionCollapsed(kind,collapsed){
   const isInput=kind==='input';
@@ -1774,7 +1938,22 @@ function renderActions(){
         inp.oninput=applyValue;
         if(f.t==='select')inp.onchange=applyValue;
       }
-      w.appendChild(inp);fs.appendChild(w);
+      w.appendChild(inp);
+      if(isActionPickerKey(f.k)&&['text','textarea','number'].indexOf(f.t)>=0){
+        const pickerRow=document.createElement('div');
+        pickerRow.className='field-picker-row';
+        const pickerBtn=document.createElement('button');
+        pickerBtn.type='button';
+        pickerBtn.className='btn btn-ghost btn-pick-binding';
+        pickerBtn.textContent='Выбрать в шаблоне';
+        pickerBtn.onclick=(ev)=>{
+          ev.preventDefault();
+          openActionBindingPicker(a,f.k,f.l||f.k);
+        };
+        pickerRow.appendChild(pickerBtn);
+        w.appendChild(pickerRow);
+      }
+      fs.appendChild(w);
     });
     const wCondEnable=fieldWrap(true);
     const inlCondEnable=document.createElement('span');inlCondEnable.className='field-inline';
@@ -2203,14 +2382,36 @@ function renderInputFields(){
         const wNamedTargets=fieldWrap(true);
         const capNamedTargets=document.createElement('span');capNamedTargets.textContent='Именованные диапазоны';
         const inNamedTargets=document.createElement('textarea');inNamedTargets.rows=2;inNamedTargets.value=f.named_targets;inNamedTargets.placeholder='CompanyName; ProductName';inNamedTargets.oninput=(ev)=>{f.named_targets=ev.target.value;};
+        const namedActions=document.createElement('div');
+        namedActions.className='field-picker-row';
+        const btnPickNamed=document.createElement('button');
+        btnPickNamed.type='button';
+        btnPickNamed.className='btn btn-ghost btn-pick-binding';
+        btnPickNamed.textContent='Выбрать в шаблоне';
+        btnPickNamed.onclick=(ev)=>{
+          ev.preventDefault();
+          openFieldNamedBindingPicker(f,inputFieldLabel(f,i));
+        };
+        namedActions.appendChild(btnPickNamed);
         const helpNamed=document.createElement('small');helpNamed.className='field-help';helpNamed.textContent='Укажите имена диапазонов через ; , или перенос строки.';
-        wNamedTargets.appendChild(capNamedTargets);wNamedTargets.appendChild(inNamedTargets);wNamedTargets.appendChild(helpNamed);fs.appendChild(wNamedTargets);
+        wNamedTargets.appendChild(capNamedTargets);wNamedTargets.appendChild(inNamedTargets);wNamedTargets.appendChild(namedActions);wNamedTargets.appendChild(helpNamed);fs.appendChild(wNamedTargets);
       }else{
         const wTargets=fieldWrap(true);
         const capTargets=document.createElement('span');capTargets.textContent='Ячейки/диапазоны';
         const inTargets=document.createElement('textarea');inTargets.rows=2;inTargets.value=f.targets;inTargets.placeholder='Лист1:A1,B2; Лист2:C3:D5';inTargets.oninput=(ev)=>{f.targets=ev.target.value;};
+        const targetActions=document.createElement('div');
+        targetActions.className='field-picker-row';
+        const btnPickTargets=document.createElement('button');
+        btnPickTargets.type='button';
+        btnPickTargets.className='btn btn-ghost btn-pick-binding';
+        btnPickTargets.textContent='Выбрать в шаблоне';
+        btnPickTargets.onclick=(ev)=>{
+          ev.preventDefault();
+          openFieldTargetsBindingPicker(f,inputFieldLabel(f,i));
+        };
+        targetActions.appendChild(btnPickTargets);
         const help=document.createElement('small');help.className='field-help';help.textContent='Формат: Лист:адрес1,адрес2; Лист2:адрес3. Адрес может быть ячейкой или диапазоном.';
-        wTargets.appendChild(capTargets);wTargets.appendChild(inTargets);wTargets.appendChild(help);fs.appendChild(wTargets);
+        wTargets.appendChild(capTargets);wTargets.appendChild(inTargets);wTargets.appendChild(targetActions);wTargets.appendChild(help);fs.appendChild(wTargets);
 
         const wMultiple=fieldWrap(true);
         const inlMultiple=document.createElement('span');inlMultiple.className='field-inline';
@@ -2342,7 +2543,18 @@ function renderInputFields(){
         const wSheets=fieldWrap(true);
         const capSheets=document.createElement('span');capSheets.textContent='Листы для поиска';
         const inSheets=document.createElement('input');inSheets.type='text';inSheets.value=f.sheets;inSheets.placeholder='Лист1, Лист2';inSheets.oninput=(ev)=>{f.sheets=ev.target.value;};
-        wSheets.appendChild(capSheets);wSheets.appendChild(inSheets);fs.appendChild(wSheets);
+        const sheetActions=document.createElement('div');
+        sheetActions.className='field-picker-row';
+        const btnPickSheets=document.createElement('button');
+        btnPickSheets.type='button';
+        btnPickSheets.className='btn btn-ghost btn-pick-binding';
+        btnPickSheets.textContent='Выбрать в шаблоне';
+        btnPickSheets.onclick=(ev)=>{
+          ev.preventDefault();
+          openFieldSheetListBindingPicker(f,inputFieldLabel(f,i));
+        };
+        sheetActions.appendChild(btnPickSheets);
+        wSheets.appendChild(capSheets);wSheets.appendChild(inSheets);wSheets.appendChild(sheetActions);fs.appendChild(wSheets);
       }
     }
 
@@ -2824,6 +3036,478 @@ async function onImportPackPicked(file){
   if(!file)return;
   const text=await file.text();
   await importPackFromText(text);
+}
+
+function clearPickerPending(id){
+  const key=String(id||'').trim();
+  if(!key||!PICKER_PENDING[key])return null;
+  const item=PICKER_PENDING[key];
+  if(item.t)clearTimeout(item.t);
+  delete PICKER_PENDING[key];
+  return item;
+}
+function clearAllPickerPending(){
+  Object.keys(PICKER_PENDING).forEach(id=>{
+    const item=clearPickerPending(id);
+    if(item&&typeof item.reject==='function')item.reject(new Error('cancelled'));
+  });
+}
+function requestPickerSnapshot(opts){
+  const settings=isObj(opts)?opts:{};
+  const requestId=reqId('picker');
+  const timeoutMs=Math.max(1500,Math.min(15000,parseInt(settings.timeoutMs,10)||6000));
+  const payload={
+    requestId,
+    includeNamed:settings.includeNamed!==false,
+    templatePath:String(settings.templatePath||getBindingPickerTemplatePath()||'')
+  };
+  return new Promise((resolve,reject)=>{
+    PICKER_PENDING[requestId]={
+      resolve,
+      reject,
+      t:setTimeout(()=>{
+        clearPickerPending(requestId);
+        reject(new Error('Таймаут получения выделения.'));
+      },timeoutMs)
+    };
+    post({event:'reportsPickerFetch',source:'reports-ui',data:payload});
+  });
+}
+function onPickerSnapshot(raw){
+  const data=isObj(raw)?raw:{};
+  const requestId=String(data.requestId||'').trim();
+  if(!requestId)return;
+  const pending=clearPickerPending(requestId);
+  if(!pending)return;
+  if(data.ok===false){
+    pending.reject(new Error(String(data.error||'Не удалось получить выделение.')));
+    return;
+  }
+  pending.resolve(data);
+}
+function formatBindingPickerItem(mode,item){
+  if(mode==='named')return String(item&&item.name||'').trim();
+  if(mode==='sheet'||mode==='sheet-list')return normalizePickerSheet(item&&item.sheet||'');
+  return formatPickerCellItem(item);
+}
+function bindingPickerItemKey(mode,item){
+  if(mode==='named')return pickerNamedKey(item&&item.name||'');
+  if(mode==='sheet'||mode==='sheet-list')return pickerSheetKey(item&&item.sheet||'');
+  return pickerCellKey(item);
+}
+function normalizeBindingPickerItem(mode,raw){
+  if(mode==='named'){
+    const name=String(raw&&raw.name||raw||'').trim();
+    return name?{name}:null;
+  }
+  if(mode==='sheet'||mode==='sheet-list'){
+    const sheet=normalizePickerSheet(raw&&raw.sheet||raw||'');
+    return sheet?{sheet}:null;
+  }
+  const sheet=normalizePickerSheet(raw&&raw.sheet||'');
+  const range=normalizePickerRange(raw&&raw.range||raw&&raw.value||'');
+  if(!sheet||!range)return null;
+  return {sheet,range};
+}
+function addBindingPickerItem(raw){
+  const picker=state.bindingPicker;
+  if(!picker)return false;
+  const item=normalizeBindingPickerItem(picker.mode,raw);
+  if(!item)return false;
+  const key=bindingPickerItemKey(picker.mode,item);
+  if(!key)return false;
+  if(picker.seen[key])return false;
+  if(!picker.allowMultiple){
+    picker.items=[];
+    picker.seen=Object.create(null);
+  }
+  picker.items.push(item);
+  picker.seen[key]=true;
+  return true;
+}
+function removeBindingPickerItem(index){
+  const picker=state.bindingPicker;
+  if(!picker||index<0||index>=picker.items.length)return;
+  const item=picker.items[index];
+  picker.items.splice(index,1);
+  const key=bindingPickerItemKey(picker.mode,item);
+  if(key)delete picker.seen[key];
+}
+function bindingPickerCurrentText(){
+  const picker=state.bindingPicker;
+  if(!picker)return 'Текущий выбор: -';
+  if(picker.loading)return 'Чтение выделения в шаблоне...';
+  if(picker.error)return `Ошибка: ${picker.error}`;
+  const current=picker.current||{sheet:'',ranges:[]};
+  const sheet=current.sheet||'-';
+  if(picker.mode==='sheet'||picker.mode==='sheet-list')return `Текущий лист: ${sheet}`;
+  if(!current.ranges||!current.ranges.length)return `Текущий лист: ${sheet}. Диапазон не выбран.`;
+  const first=current.ranges[0];
+  if(current.ranges.length===1)return `Текущий выбор: ${sheet}:${first}`;
+  return `Текущий выбор: ${sheet}:${first} (+${current.ranges.length-1})`;
+}
+function renderBindingPickerList(){
+  if(!els.bindingPickerList)return;
+  const picker=state.bindingPicker;
+  els.bindingPickerList.innerHTML='';
+  if(!picker||!picker.items.length){
+    const empty=document.createElement('div');
+    empty.className='binding-picker-empty';
+    empty.textContent='Ничего не выбрано.';
+    els.bindingPickerList.appendChild(empty);
+    return;
+  }
+  picker.items.forEach((item,index)=>{
+    const row=document.createElement('div');
+    row.className='binding-picker-item';
+    const text=document.createElement('span');
+    text.className='binding-picker-item-text';
+    text.textContent=formatBindingPickerItem(picker.mode,item);
+    const removeBtn=document.createElement('button');
+    removeBtn.type='button';
+    removeBtn.className='btn btn-danger binding-picker-item-remove';
+    removeBtn.textContent='×';
+    removeBtn.onclick=(ev)=>{
+      ev.preventDefault();
+      removeBindingPickerItem(index);
+      renderBindingPickerList();
+    };
+    row.appendChild(text);
+    row.appendChild(removeBtn);
+    els.bindingPickerList.appendChild(row);
+  });
+}
+function renderBindingPickerNamedList(){
+  if(!els.bindingPickerNamed||!els.bindingPickerNamedSelect)return;
+  const picker=state.bindingPicker;
+  const show=!!(picker&&picker.allowNamed);
+  els.bindingPickerNamed.classList.toggle('hidden',!show);
+  if(!show)return;
+  const named=Array.isArray(picker.namedRanges)?picker.namedRanges:[];
+  els.bindingPickerNamedSelect.innerHTML='';
+  if(!named.length){
+    const option=document.createElement('option');
+    option.value='';
+    option.textContent='Именованные диапазоны не найдены';
+    els.bindingPickerNamedSelect.appendChild(option);
+    return;
+  }
+  named.forEach(item=>{
+    const option=document.createElement('option');
+    option.value=item.name;
+    let label=item.name;
+    if(item.scope)label+=` (${item.scope})`;
+    if(item.ref)label+=` - ${item.ref}`;
+    option.textContent=label;
+    els.bindingPickerNamedSelect.appendChild(option);
+  });
+}
+function refreshBindingPickerUi(){
+  const picker=state.bindingPicker;
+  if(!els.bindingPicker||!picker)return;
+  if(els.bindingPickerTitle)els.bindingPickerTitle.textContent=picker.title||'Привязка к шаблону';
+  if(els.bindingPickerSubtitle)els.bindingPickerSubtitle.textContent=picker.subtitle||'Выберите ячейки/диапазоны в открытом шаблоне.';
+  if(els.bindingPickerCurrent)els.bindingPickerCurrent.textContent=bindingPickerCurrentText();
+  if(els.btnBindingAddCurrent)els.btnBindingAddCurrent.classList.toggle('hidden',!picker.allowCurrent);
+  renderBindingPickerNamedList();
+  renderBindingPickerList();
+}
+function setBindingPickerPosition(left,top){
+  if(!els.bindingPicker)return;
+  const rect=els.bindingPicker.getBoundingClientRect();
+  const maxLeft=Math.max(8,window.innerWidth-rect.width-8);
+  const maxTop=Math.max(8,window.innerHeight-rect.height-8);
+  const nextLeft=Math.max(8,Math.min(maxLeft,parseInt(left,10)||8));
+  const nextTop=Math.max(8,Math.min(maxTop,parseInt(top,10)||8));
+  state.bindingPickerPos={left:nextLeft,top:nextTop};
+  els.bindingPicker.style.left=`${nextLeft}px`;
+  els.bindingPicker.style.top=`${nextTop}px`;
+}
+function ensureBindingPickerPosition(){
+  if(!els.bindingPicker)return;
+  const panel=els.bindingPicker;
+  panel.style.left='-9999px';
+  panel.style.top='-9999px';
+  const rect=panel.getBoundingClientRect();
+  const pos=state.bindingPickerPos||{
+    left:Math.max(8,window.innerWidth-rect.width-22),
+    top:Math.max(70,Math.min(window.innerHeight-rect.height-18,96))
+  };
+  setBindingPickerPosition(pos.left,pos.top);
+}
+function applyBindingPickerSelection(){
+  const picker=state.bindingPicker;
+  if(!picker||typeof picker.apply!=='function')return;
+  const payload={mode:picker.mode,items:clone(picker.items)};
+  if(picker.mode==='named')payload.names=picker.items.map(item=>item.name);
+  if(picker.mode==='sheet'||picker.mode==='sheet-list')payload.sheets=picker.items.map(item=>item.sheet);
+  if(picker.mode!=='named'&&picker.mode!=='sheet'&&picker.mode!=='sheet-list'){
+    payload.selection=picker.items.length?clone(picker.items[0]):null;
+  }
+  picker.apply(payload);
+}
+function closeBindingPicker(apply){
+  if(apply)applyBindingPickerSelection();
+  clearAllPickerPending();
+  state.bindingPicker=null;
+  state.bindingPickerDrag=null;
+  if(els.bindingPicker){
+    els.bindingPicker.classList.add('hidden');
+    els.bindingPicker.style.left='';
+    els.bindingPicker.style.top='';
+  }
+}
+function addBindingPickerCurrent(){
+  const picker=state.bindingPicker;
+  if(!picker||!picker.current)return;
+  const current=picker.current;
+  if(picker.mode==='sheet'||picker.mode==='sheet-list'){
+    if(!current.sheet){toast('Не удалось определить активный лист.','error');return;}
+    const added=addBindingPickerItem({sheet:current.sheet});
+    if(!added)toast('Этот лист уже добавлен.','error');
+    renderBindingPickerList();
+    return;
+  }
+  if(!current.sheet||!Array.isArray(current.ranges)||!current.ranges.length){
+    toast('Сначала выделите ячейку или диапазон в открытом шаблоне.','error');
+    return;
+  }
+  let addedCount=0;
+  current.ranges.forEach(range=>{
+    if(addBindingPickerItem({sheet:current.sheet,range}))addedCount+=1;
+  });
+  if(!addedCount){
+    toast('Выбранный диапазон уже есть в списке.','error');
+  }
+  renderBindingPickerList();
+}
+function addBindingPickerNamed(){
+  const picker=state.bindingPicker;
+  if(!picker||!picker.allowNamed||!els.bindingPickerNamedSelect)return;
+  const value=String(els.bindingPickerNamedSelect.value||'').trim();
+  if(!value){
+    toast('Выберите именованный диапазон.','error');
+    return;
+  }
+  const added=addBindingPickerItem({name:value});
+  if(!added){
+    toast('Этот именованный диапазон уже добавлен.','error');
+    return;
+  }
+  renderBindingPickerList();
+}
+async function refreshBindingPicker(){
+  const picker=state.bindingPicker;
+  if(!picker)return;
+  picker.loading=true;
+  picker.error='';
+  refreshBindingPickerUi();
+  try{
+    const data=await requestPickerSnapshot({includeNamed:picker.allowNamed,templatePath:picker.templatePath,timeoutMs:7000});
+    if(state.bindingPicker!==picker)return;
+    picker.current=parsePickerSelectionData(data);
+    picker.namedRanges=normalizePickerNamedRanges(data.namedRanges);
+    picker.loading=false;
+    picker.error='';
+    refreshBindingPickerUi();
+  }catch(err){
+    if(state.bindingPicker!==picker)return;
+    picker.loading=false;
+    picker.error=err&&err.message?String(err.message):'Не удалось получить выделение.';
+    refreshBindingPickerUi();
+  }
+}
+function openTemplateForBindingPicker(){
+  const templatePath=resolveTemplate(getBindingPickerTemplatePath());
+  if(!templatePath){
+    toast('Сначала укажите путь к шаблону в сценарии.','error');
+    return;
+  }
+  openResult(templatePath,state.draft&&state.draft.id?state.draft.id:null);
+}
+function openBindingPicker(config){
+  const settings=isObj(config)?config:{};
+  if(typeof settings.apply!=='function')return;
+  if(state.bindingPicker)closeBindingPicker(false);
+  const mode=String(settings.mode||'cells');
+  const allowNamed=mode==='named' || !!settings.allowNamed;
+  const allowCurrent=mode!=='named';
+  const allowMultiple=settings.allowMultiple!==false;
+  const picker={
+    mode,
+    title:String(settings.title||'Привязка к шаблону'),
+    subtitle:String(settings.subtitle||'Выберите ячейки/диапазоны в открытом шаблоне.'),
+    templatePath:String(settings.templatePath||getBindingPickerTemplatePath()||''),
+    allowNamed,
+    allowCurrent,
+    allowMultiple,
+    apply:settings.apply,
+    current:{sheet:'',ranges:[]},
+    namedRanges:[],
+    items:[],
+    seen:Object.create(null),
+    loading:false,
+    error:''
+  };
+  state.bindingPicker=picker;
+  const initial=Array.isArray(settings.initialItems)?settings.initialItems:[];
+  initial.forEach(item=>addBindingPickerItem(item));
+  if(els.bindingPicker){
+    els.bindingPicker.classList.remove('hidden');
+    ensureBindingPickerPosition();
+  }
+  refreshBindingPickerUi();
+  refreshBindingPicker();
+}
+function startBindingPickerDrag(ev){
+  if(!state.bindingPicker||!els.bindingPicker||!els.bindingPickerHead)return;
+  if(!ev||ev.button!==0)return;
+  if(ev.target&&typeof ev.target.closest==='function'&&ev.target.closest('button'))return;
+  const rect=els.bindingPicker.getBoundingClientRect();
+  state.bindingPickerDrag={dx:ev.clientX-rect.left,dy:ev.clientY-rect.top};
+  ev.preventDefault();
+}
+function moveBindingPickerDrag(ev){
+  if(!state.bindingPickerDrag||!state.bindingPicker||!els.bindingPicker)return;
+  const left=ev.clientX-state.bindingPickerDrag.dx;
+  const top=ev.clientY-state.bindingPickerDrag.dy;
+  setBindingPickerPosition(left,top);
+}
+function stopBindingPickerDrag(){
+  state.bindingPickerDrag=null;
+}
+function actionPickerSheetKey(key){
+  if(key==='from_range')return 'from_sheet';
+  if(key==='to_cell')return 'to_sheet';
+  return 'sheet';
+}
+function isActionPickerKey(key){
+  return ['sheet','from_sheet','to_sheet','range','from_range','to_cell','key1','key2','key3','start_row','end_row','start_column','end_column'].indexOf(String(key||''))>=0;
+}
+function actionPickerMode(key){
+  if(key==='sheet'||key==='from_sheet'||key==='to_sheet')return 'sheet';
+  if(key==='start_row'||key==='end_row')return 'rows';
+  if(key==='start_column'||key==='end_column')return 'columns';
+  return 'range';
+}
+function buildActionPickerInitialItems(action,key,mode){
+  if(mode==='sheet'){
+    const sheet=normalizePickerSheet(action&&action[key]||'');
+    return sheet?[{sheet}]:[];
+  }
+  if(mode==='rows'){
+    const start=String(action&&action.start_row||'').trim();
+    const end=String(action&&action.end_row||start).trim();
+    const sheet=normalizePickerSheet(action&&action.sheet||'');
+    if(sheet&&start)return[{sheet,range:end?`${start}:${end}`:start}];
+    return [];
+  }
+  if(mode==='columns'){
+    const start=String(action&&action.start_column||'').trim();
+    const end=String(action&&action.end_column||start).trim();
+    const sheet=normalizePickerSheet(action&&action.sheet||'');
+    if(sheet&&start)return[{sheet,range:end?`${start}:${end}`:start}];
+    return [];
+  }
+  const sheetKey=actionPickerSheetKey(key);
+  const sheet=normalizePickerSheet(action&&action[sheetKey]||'');
+  const range=normalizePickerRange(action&&action[key]||'');
+  if(sheet&&range)return[{sheet,range}];
+  return [];
+}
+function applyActionPickerSelection(action,key,mode,payload){
+  if(!payload||!Array.isArray(payload.items)||!payload.items.length)return;
+  const item=payload.items[0];
+  if(mode==='sheet'){
+    if(item.sheet)action[key]=item.sheet;
+    return;
+  }
+  const sheetKey=actionPickerSheetKey(key);
+  if(sheetKey&&item.sheet)action[sheetKey]=item.sheet;
+  const bounds=parseRangeBounds(item.range||'');
+  if(mode==='rows'){
+    if(!bounds||bounds.rowStart==null)return;
+    if(Object.prototype.hasOwnProperty.call(action,'start_row'))action.start_row=String(bounds.rowStart);
+    if(Object.prototype.hasOwnProperty.call(action,'end_row'))action.end_row=String(bounds.rowEnd==null?bounds.rowStart:bounds.rowEnd);
+    return;
+  }
+  if(mode==='columns'){
+    if(!bounds||!bounds.colStart)return;
+    if(Object.prototype.hasOwnProperty.call(action,'start_column'))action.start_column=String(bounds.colStart);
+    if(Object.prototype.hasOwnProperty.call(action,'end_column'))action.end_column=String(bounds.colEnd||bounds.colStart);
+    return;
+  }
+  if(!item.range)return;
+  if(key==='to_cell'){
+    if(bounds&&bounds.colStart&&bounds.rowStart!=null){
+      action[key]=`${bounds.colStart}${bounds.rowStart}`;
+    }else{
+      action[key]=normalizePickerRange(item.range);
+    }
+  }else{
+    action[key]=bounds&&bounds.range?bounds.range:normalizePickerRange(item.range);
+  }
+}
+function openActionBindingPicker(action,key,label){
+  if(!state.draft)return;
+  const mode=actionPickerMode(key);
+  openBindingPicker({
+    mode,
+    allowMultiple:false,
+    title:`Привязка: ${label}`,
+    subtitle:'Выделите ячейку/диапазон в открытом шаблоне и нажмите «Добавить текущий выбор».',
+    templatePath:getBindingPickerTemplatePath(),
+    initialItems:buildActionPickerInitialItems(action,key,mode),
+    apply:(payload)=>{
+      applyActionPickerSelection(action,key,mode,payload);
+      renderActions();
+    }
+  });
+}
+function openFieldTargetsBindingPicker(field,label){
+  openBindingPicker({
+    mode:'cells',
+    allowMultiple:true,
+    title:`Привязка поля: ${label}`,
+    subtitle:'Можно добавить один или несколько диапазонов.',
+    templatePath:getBindingPickerTemplatePath(),
+    initialItems:parseCellBindingItemsSafe(field.targets),
+    apply:(payload)=>{
+      field.targets=stringifyCellBindings(payload.items||[]);
+      renderInputFields();
+    }
+  });
+}
+function openFieldNamedBindingPicker(field,label){
+  openBindingPicker({
+    mode:'named',
+    allowMultiple:true,
+    allowNamed:true,
+    title:`Именованные диапазоны: ${label}`,
+    subtitle:'Выберите диапазоны из списка и добавьте их.',
+    templatePath:getBindingPickerTemplatePath(),
+    initialItems:parseNamedTargets(field.named_targets).map(name=>({name})),
+    apply:(payload)=>{
+      const names=Array.isArray(payload.names)?payload.names:[];
+      field.named_targets=names.join('; ');
+      renderInputFields();
+    }
+  });
+}
+function openFieldSheetListBindingPicker(field,label){
+  openBindingPicker({
+    mode:'sheet-list',
+    allowMultiple:true,
+    title:`Листы для поля: ${label}`,
+    subtitle:'Добавьте один или несколько листов из открытого шаблона.',
+    templatePath:getBindingPickerTemplatePath(),
+    initialItems:parseSheetList(field.sheets).map(sheet=>({sheet})),
+    apply:(payload)=>{
+      const sheets=Array.isArray(payload.sheets)?payload.sheets:[];
+      field.sheets=sheets.join(', ');
+      renderInputFields();
+    }
+  });
 }
 
 function createRuntimeInputControl(field,initialValue,selectOptions){
@@ -3364,6 +4048,16 @@ function bind(){
   els.btnExportPackClose&&els.btnExportPackClose.addEventListener('click',closeExportPackModal);
   els.btnExportPackCancel&&els.btnExportPackCancel.addEventListener('click',closeExportPackModal);
   els.btnExportPackSubmit&&els.btnExportPackSubmit.addEventListener('click',submitExportPack);
+  els.btnBindingOpenTemplate&&els.btnBindingOpenTemplate.addEventListener('click',openTemplateForBindingPicker);
+  els.btnBindingClose&&els.btnBindingClose.addEventListener('click',()=>closeBindingPicker(false));
+  els.btnBindingCancel&&els.btnBindingCancel.addEventListener('click',()=>closeBindingPicker(false));
+  els.btnBindingDone&&els.btnBindingDone.addEventListener('click',()=>closeBindingPicker(true));
+  els.btnBindingAddCurrent&&els.btnBindingAddCurrent.addEventListener('click',addBindingPickerCurrent);
+  els.btnBindingAddNamed&&els.btnBindingAddNamed.addEventListener('click',addBindingPickerNamed);
+  els.btnBindingRefresh&&els.btnBindingRefresh.addEventListener('click',refreshBindingPicker);
+  els.bindingPickerHead&&els.bindingPickerHead.addEventListener('mousedown',startBindingPickerDrag);
+  window.addEventListener('mousemove',moveBindingPickerDrag);
+  window.addEventListener('mouseup',stopBindingPickerDrag);
   els.file&&els.file.addEventListener('change',()=>{const f=els.file.files&&els.file.files[0];if(f&&f.path){els.tpl.value=toFsPath(f.path);if(state.draft)state.draft.templatePath=els.tpl.value;return;}const v=els.file.value||'';if(v&&!/fakepath/i.test(v)){els.tpl.value=toFsPath(v);if(state.draft)state.draft.templatePath=els.tpl.value;return;}toast('Введите полный путь к шаблону вручную.','error');});
   els.modal&&els.modal.addEventListener('click',e=>{if(e.target&&e.target.classList&&e.target.classList.contains('modal-backdrop'))closeModal();});
   els.runInputModal&&els.runInputModal.addEventListener('click',e=>{if(e.target&&e.target.classList&&e.target.classList.contains('modal-backdrop'))closeRunInputModal(null);});
@@ -3372,6 +4066,7 @@ function bind(){
   document.addEventListener('click',()=>closeColorMenus());
   document.addEventListener('keydown',e=>{
     if(e.key==='Escape'){
+      if(state.bindingPicker){closeBindingPicker(false);return;}
       if(els.listEditorModal&&!els.listEditorModal.classList.contains('hidden')){closeListEditorModal(false);return;}
       if(els.exportPackModal&&!els.exportPackModal.classList.contains('hidden')){closeExportPackModal();return;}
       closeColorMenus();
@@ -3398,6 +4093,7 @@ function bind(){
     const m=parse(e.data);
     if(!isObj(m))return;
     if(m.event==='uiThemeChanged'){handleThemeBridgeMessage(m.data);return;}
+    if(m.event==='reportsPickerData'&&m.data){onPickerSnapshot(m.data);return;}
     if(m.event==='reportsDocBuilderResult'&&m.data)onDbResult(m.data);
     if(m.event==='reportsDocBuilderProbeResult'&&m.data)onDbResult(m.data);
   });

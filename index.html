@@ -171,8 +171,35 @@
     </div>
   </div>
 
+  <div id="binding-picker" class="binding-picker hidden" role="dialog" aria-modal="false" aria-label="Привязка к шаблону">
+    <div id="binding-picker-head" class="binding-picker-head">
+      <div class="binding-picker-title-wrap">
+        <div id="binding-picker-title" class="binding-picker-title">Привязка к шаблону</div>
+        <div id="binding-picker-subtitle" class="binding-picker-subtitle">Выберите ячейки/диапазоны в открытом шаблоне.</div>
+      </div>
+      <div class="binding-picker-head-actions">
+        <button id="btn-binding-open-template" class="btn btn-ghost" type="button">Открыть шаблон</button>
+        <button id="btn-binding-close" class="btn btn-danger" type="button">×</button>
+      </div>
+    </div>
+    <div class="binding-picker-body">
+      <div id="binding-picker-current" class="binding-picker-current">Текущий выбор: -</div>
+      <div id="binding-picker-named" class="binding-picker-named hidden">
+        <select id="binding-picker-named-select"></select>
+        <button id="btn-binding-add-named" class="btn btn-secondary" type="button">Добавить имя</button>
+      </div>
+      <div id="binding-picker-list" class="binding-picker-list"></div>
+    </div>
+    <footer class="binding-picker-footer">
+      <button id="btn-binding-add-current" class="btn btn-secondary" type="button">Добавить текущий выбор</button>
+      <button id="btn-binding-refresh" class="btn btn-ghost" type="button">Обновить</button>
+      <button id="btn-binding-cancel" class="btn btn-ghost" type="button">Отмена</button>
+      <button id="btn-binding-done" class="btn btn-primary" type="button">Готово</button>
+    </footer>
+  </div>
+
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=20260218-02"></script>
+  <script src="app.js?v=20260218-03"></script>
 </body>
 </html>
