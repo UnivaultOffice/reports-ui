@@ -262,6 +262,12 @@ function getLegacyScenariosPath(){return joinPath(getReportsUiDir(),SCENARIOS_LE
 function getScenariosDir(){return joinPath(getReportsUiDir(),SCENARIOS_DIR);}
 function getScenariosIndexPath(){return joinPath(getReportsUiDir(),SCENARIOS_INDEX_FILE);}
 function getScenarioPath(fileName){return joinPath(getScenariosDir(),String(fileName||''));}
+function getScenarioTemplatePath(name){return joinPath(getTemplatesDir(),`${sanitizeTemplateName(name)}.${SCENARIO_TEMPLATE_EXT}`);}
+function isManagedScenarioTemplatePath(path,scenarioName){
+  const resolved=resolveTemplate(path);
+  if(!resolved)return false;
+  return samePath(resolved,getScenarioTemplatePath(scenarioName));
+}
 function reportsDirFromProbe(probe){
   const runtime=probe&&probe.runtimeDir?normSlashes(probe.runtimeDir):'';
   if(!runtime||!isAbsPath(runtime))return '';
@@ -305,6 +311,18 @@ function ensureScenarioFileNameUniq(fileName,used){
   }
   used[next.toLowerCase()]=true;
   return next;
+}
+function buildScenarioFileUsedMap(excludeScenarioId){
+  const used=Object.create(null);
+  state.scenarios.forEach(sc=>{
+    if(excludeScenarioId&&sc.id===excludeScenarioId)return;
+    const file=String(state.scenarioFiles[sc.id]||'').trim();
+    if(file)used[file.toLowerCase()]=true;
+  });
+  return used;
+}
+function makeScenarioFileNameForScenario(scenarioId,scenarioName){
+  return ensureScenarioFileNameUniq(makeScenarioFileName(scenarioName),buildScenarioFileUsedMap(scenarioId));
 }
 function fmtStamp(){
   const d=new Date();
@@ -1495,6 +1513,27 @@ async function writeTextFile(path,content,timeoutMs){
   if(!isObj(r)||!r.ok)throw fileErr(r||{error:'write_failed'});
   return r;
 }
+async function movePath(fromPath,toPath,timeoutMs){
+  const from=String(fromPath||'').trim();
+  const to=String(toPath||'').trim();
+  if(!from||!to)return {ok:false,error:'invalid_path'};
+  if(samePath(from,to))return {ok:true};
+  const r=await requestNativeFile('reports:fileMove',{fromPath:from,toPath:to},timeoutMs||6000);
+  if(!isObj(r))throw fileErr({error:'invalid_move_response'});
+  if(!r.ok&&String(r.error||'')!=='not_found')throw fileErr(r);
+  return r;
+}
+async function deletePath(path,timeoutMs){
+  const p=String(path||'').trim();
+  if(!p)return {ok:false,error:'invalid_path'};
+  const r=await requestNativeFile('reports:fileDelete',{path:p},timeoutMs||5000);
+  if(!isObj(r))throw fileErr({error:'invalid_delete_response'});
+  if(!r.ok&&String(r.error||'')!=='not_found')throw fileErr(r);
+  return r;
+}
+function warnFileOpsNeedRebuild(){
+  toast('Файлы не удалось переименовать/удалить. Обновите DesktopEditors (reports:fileMove/reports:fileDelete).','error');
+}
 function parseScenarioIndex(rawText){
   const raw=parse(rawText);
   const src=Array.isArray(raw)?raw:(isObj(raw)&&Array.isArray(raw.items)?raw.items:[]);
@@ -1605,13 +1644,15 @@ async function loadScenariosFromScenarioFiles(){
 }
 function save(){
   saveLocalStorageOnly();
-  if(state.fileBridge!=='ready')return;
-  queuePersistScenarios()
-    .then(()=>{state.fileSaveWarned=false;})
+  if(state.fileBridge!=='ready')return Promise.resolve(true);
+  return queuePersistScenarios()
+    .then(()=>{state.fileSaveWarned=false;return true;})
     .catch(()=>{
-      if(state.fileSaveWarned)return;
-      state.fileSaveWarned=true;
-      toast('Не удалось сохранить сценарии в reports-ui/data/scenarios/.','error');
+      if(!state.fileSaveWarned){
+        state.fileSaveWarned=true;
+        toast('Не удалось сохранить сценарии в reports-ui/data/scenarios/.','error');
+      }
+      return false;
     });
 }
 async function load(){
@@ -1699,6 +1740,26 @@ function syncSectionCollapseUi(){
   setSectionCollapsed('action',state.actionCollapsed);
 }
 
+async function removeScenario(id){
+  const idx=state.scenarios.findIndex(x=>x.id===id);
+  if(idx<0)return;
+  const scenario=state.scenarios[idx];
+  const scenarioFile=String(state.scenarioFiles[scenario.id]||'').trim();
+  const scenarioPath=scenarioFile?getScenarioPath(scenarioFile):'';
+  const templatePath=isManagedScenarioTemplatePath(scenario.templatePath,scenario.name)?resolveTemplate(scenario.templatePath):'';
+  state.scenarios.splice(idx,1);
+  delete state.scenarioFiles[scenario.id];
+  renderList();
+  toast('Сценарий удален.','ok');
+  save().catch(()=>{});
+  if(state.fileBridge==='ready'){
+    Promise.all([
+      scenarioPath?deletePath(scenarioPath,2500):Promise.resolve({ok:true}),
+      templatePath?deletePath(templatePath,2500):Promise.resolve({ok:true})
+    ]).catch(()=>{warnFileOpsNeedRebuild();});
+  }
+}
+
 function renderList(){
   const q=state.q.trim().toLowerCase();
   const list=state.scenarios.slice().sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt)).filter(s=>!q||(`${s.name} ${s.description} ${s.templatePath}`.toLowerCase().includes(q)));
@@ -1717,7 +1778,7 @@ function renderList(){
     const bRun=document.createElement('button');bRun.className='btn btn-primary';bRun.type='button';bRun.textContent=state.running===s.id?'Выполняется...':'Заполнить';bRun.disabled=!!state.running||!!state.runInput;bRun.onclick=()=>runScenario(s.id);
     const bEdit=document.createElement('button');bEdit.className='btn btn-secondary';bEdit.type='button';bEdit.textContent='Изменить';bEdit.onclick=()=>openModal(s.id);
     const bTpl=document.createElement('button');bTpl.className='btn btn-ghost';bTpl.type='button';bTpl.textContent='Открыть шаблон';bTpl.disabled=!s.templatePath;bTpl.onclick=()=>openTemplateInEditor(s.id);
-    const bDel=document.createElement('button');bDel.className='btn btn-danger';bDel.type='button';bDel.textContent='Удалить';bDel.onclick=()=>{if(confirm(`Удалить сценарий "${s.name}"?`)){state.scenarios=state.scenarios.filter(x=>x.id!==s.id);delete state.scenarioFiles[s.id];save();renderList();toast('Сценарий удален.','ok');}};
+    const bDel=document.createElement('button');bDel.className='btn btn-danger';bDel.type='button';bDel.textContent='Удалить';bDel.onclick=()=>{removeScenario(s.id).catch(()=>{toast('Не удалось удалить сценарий.','error');});};
     [bRun,bEdit,bTpl,bDel].forEach(x=>a.appendChild(x));
     els.list.appendChild(c);
   });
@@ -2426,12 +2487,21 @@ function dbReason(err){
   const d=err&&err.details?err.details:null;
   return d&&d.stderr?d.stderr:(d&&d.error?d.error:(err&&err.message?err.message:'Неизвестная ошибка'));
 }
-async function prepareTemplatePath(draft){
+async function prepareTemplatePath(draft,previousScenario){
   const source=resolveTemplate(draft.templatePath);
   if(!source)throw new Error('Некорректный путь к шаблону.');
   const targetName=sanitizeTemplateName(draft.name);
   const targetPath=joinPath(getTemplatesDir(),`${targetName}.${SCENARIO_TEMPLATE_EXT}`);
   if(samePath(source,targetPath))return targetPath;
+  if(previousScenario){
+    const prevName=String(previousScenario.name||'');
+    const renamed=prevName!==String(draft.name||'');
+    const prevTemplatePath=resolveTemplate(previousScenario.templatePath);
+    if(renamed&&prevTemplatePath&&samePath(source,prevTemplatePath)&&isManagedScenarioTemplatePath(prevTemplatePath,prevName)&&state.fileBridge==='ready'){
+      const moved=await movePath(source,targetPath,4000).catch(()=>null);
+      if(moved&&moved.ok)return targetPath;
+    }
+  }
   const requestId=reqId('docbuilder-template');
   const runPayload={requestId,script:SCRIPT,openAfterRun:false,argument:{templatePath:source,outputPath:targetPath,scenarioId:draft.id||'',scenarioName:draft.name||'',stopOnError:true,actions:[]}};
   const runPromise=runDb(runPayload); runPromise.catch(()=>{});
@@ -2451,26 +2521,60 @@ async function prepareTemplatePath(draft){
 async function saveDraft(){
   const err=validateDraft();if(err){toast(err,'error');return;}
   const draftRef=state.draft;
+  const existingIdx=state.scenarios.findIndex(x=>x.id===draftRef.id);
+  const previousScenario=existingIdx>=0?state.scenarios[existingIdx]:null;
+  const previousName=String(previousScenario&&previousScenario.name||'');
+  const previousScenarioFile=previousScenario?String(state.scenarioFiles[draftRef.id]||'').trim():'';
+  const previousTemplatePath=previousScenario?resolveTemplate(previousScenario.templatePath):'';
   const btn=els.btnSave;
   if(btn){btn.disabled=true;btn.textContent='Сохранение...';}
   try{
     toast('Подготовка шаблона...','ok');
-    const preparedPath=await prepareTemplatePath(draftRef);
+    const preparedPath=await prepareTemplatePath(draftRef,previousScenario);
     if(state.draft!==draftRef||!state.draft)return;
     state.draft.templatePath=preparedPath;
     els.tpl.value=preparedPath;
     const s={id:state.draft.id,name:state.draft.name,description:state.draft.description,templatePath:state.draft.templatePath,actions:state.draft.actions.map(normAction),inputFields:(state.draft.inputFields||[]).map(normInputField),createdAt:state.draft.createdAt||new Date().toISOString(),updatedAt:new Date().toISOString(),lastRunAt:state.draft.lastRunAt||null};
-    const idx=state.scenarios.findIndex(x=>x.id===s.id);
-    if(idx>=0){
-      if(String(state.scenarios[idx].name||'')!==String(s.name||''))delete state.scenarioFiles[s.id];
-      state.scenarios[idx]=s;
+    let staleScenarioPath='';
+    let staleTemplatePath='';
+    if(existingIdx>=0){
+      const renamed=previousName!==String(s.name||'');
+      state.scenarios[existingIdx]=s;
+      if(renamed){
+        const nextScenarioFile=makeScenarioFileNameForScenario(s.id,s.name);
+        if(previousScenarioFile&&previousScenarioFile.toLowerCase()!==nextScenarioFile.toLowerCase()){
+          const prevScenarioPath=getScenarioPath(previousScenarioFile);
+          const nextScenarioPath=getScenarioPath(nextScenarioFile);
+          let renamedScenarioFile=false;
+          if(state.fileBridge==='ready'){
+            const moved=await movePath(prevScenarioPath,nextScenarioPath,3500).catch(()=>null);
+            renamedScenarioFile=!!(moved&&moved.ok);
+          }
+          if(!renamedScenarioFile)staleScenarioPath=prevScenarioPath;
+        }
+        state.scenarioFiles[s.id]=nextScenarioFile;
+        if(previousTemplatePath&&isManagedScenarioTemplatePath(previousTemplatePath,previousName)&&!samePath(previousTemplatePath,preparedPath)){
+          staleTemplatePath=previousTemplatePath;
+        }
+      }else if(previousScenarioFile){
+        state.scenarioFiles[s.id]=previousScenarioFile;
+      }
       toast('Сценарий обновлен.','ok');
     }else{
       state.scenarios.push(s);
       delete state.scenarioFiles[s.id];
       toast('Сценарий создан.','ok');
     }
-    save();renderList();closeModal();
+    await save();
+    if(state.fileBridge==='ready'){
+      const tasks=[];
+      if(staleScenarioPath)tasks.push(deletePath(staleScenarioPath,2500));
+      if(staleTemplatePath)tasks.push(deletePath(staleTemplatePath,2500));
+      if(tasks.length){
+        Promise.all(tasks).catch(()=>{warnFileOpsNeedRebuild();});
+      }
+    }
+    renderList();closeModal();
   }catch(e){
     toast(`Не удалось подготовить шаблон: ${dbReason(e)}`,'error');
   }finally{
