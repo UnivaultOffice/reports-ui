@@ -21,7 +21,7 @@ const SCENARIO_TEMPLATE_EXT='xlsx';
 const GENERATED_DIR='generated';
 const THEME_IDS=['theme-light','theme-classic-light','theme-dark','theme-contrast-dark','theme-gray','theme-white','theme-night'];
 
-const state={scenarios:[],scenarioFiles:Object.create(null),persistScenariosPromise:Promise.resolve(),q:'',draft:null,running:null,probe:null,toastTimer:null,runInput:null,listEditor:null,exportPack:null,inputCollapsed:false,actionCollapsed:false,collapsedInputItems:Object.create(null),collapsedActionItems:Object.create(null),fileBridge:'unknown',fileSaveWarned:false};
+const state={scenarios:[],scenarioFiles:Object.create(null),persistScenariosPromise:Promise.resolve(),q:'',draft:null,running:null,probe:null,toastTimer:null,runInput:null,listEditor:null,exportPack:null,inputCollapsed:false,sourceCollapsed:false,actionCollapsed:false,collapsedInputItems:Object.create(null),collapsedActionItems:Object.create(null),collapsedSourceItems:Object.create(null),collapsedSourceGroups:{fields:false,lists:false,tables:false},fileBridge:'unknown',fileSaveWarned:false};
 
 const schema={
   set_cell_value:{label:'Вставить значение',d:{sheet:'Лист1',range:'A1',mode:'text',value:'',merge:false,keep_template_format:true,apply_alignment:false,horizontal:'',vertical:'',wrap:false,apply_number_format:false,format_preset:'general',decimals:'2',use_thousands:false,currency_symbol:'₽',negative_red:false,custom_format:'General',format:'General',apply_font:false,font_name:'Arial',font_size:'11',bold:false,italic:false,underline:'none',strikeout:false,font_color:'auto',apply_fill:false,fill_color:'none'},f:[
@@ -203,6 +203,7 @@ const NUMBER_FORMAT_PRESETS=[
 const H_ALIGN_OPTIONS=[['','(как в шаблоне)'],['left','Слева'],['center','По центру'],['right','Справа'],['justify','По ширине']];
 const V_ALIGN_OPTIONS=[['','(как в шаблоне)'],['top','Сверху'],['center','По центру'],['bottom','Снизу'],['justify','По высоте'],['distributed','Распределить']];
 const INPUT_TYPES=[['text','Текст'],['multiline','Многострочный текст'],['number','Число'],['date','Дата'],['select','Список'],['boolean','Да/Нет']];
+const SOURCE_READ_MODE_OPTIONS=[['value','Значение'],['formula','Формула']];
 const CONDITION_OPERATORS=[
   ['equals','Равно'],
   ['not_equals','Не равно'],
@@ -226,15 +227,20 @@ const els={
   name:document.getElementById('scenario-name'),tpl:document.getElementById('scenario-template'),descr:document.getElementById('scenario-description'),
   inputList:document.getElementById('input-field-list'),btnAddInputField:document.getElementById('btn-add-input-field'),
   btnAddInputFieldBottom:document.getElementById('btn-add-input-field-bottom'),
+  inputSectionTitle:document.getElementById('input-section-title'),
   btnToggleInputSection:document.getElementById('btn-toggle-input-section'),
   inputSectionBody:document.getElementById('input-section-body'),
+  sourceSectionTitle:document.getElementById('source-section-title'),
   sourceConfigRoot:document.getElementById('source-config-root'),
   btnAddSourceField:document.getElementById('btn-add-source-field'),
   btnAddSourceList:document.getElementById('btn-add-source-list'),
   btnAddSourceTable:document.getElementById('btn-add-source-table'),
+  btnToggleSourceSection:document.getElementById('btn-toggle-source-section'),
+  sourceSectionBody:document.getElementById('source-section-body'),
   btnPick:document.getElementById('btn-pick-template'),file:document.getElementById('template-file-input'),actionList:document.getElementById('action-list'),
   btnAddAction:document.getElementById('btn-add-action'),
   btnAddActionBottom:document.getElementById('btn-add-action-bottom'),
+  actionSectionTitle:document.getElementById('action-section-title'),
   btnToggleActionSection:document.getElementById('btn-toggle-action-section'),
   actionSectionBody:document.getElementById('action-section-body'),
   toast:document.getElementById('toast'),
@@ -468,6 +474,12 @@ function safeSourceKey(value,fallback){
   if(!out)out=String(fallback||'item');
   return out;
 }
+function normSourceReadMode(value){
+  return String(value||'value').trim().toLowerCase()==='formula'?'formula':'value';
+}
+function sourceReadModeLabel(value){
+  return normSourceReadMode(value)==='formula'?'Формула':'Значение';
+}
 function mkSourceFileConfig(){
   return {
     enabled:false,
@@ -504,6 +516,7 @@ function mkSourceField(){
     label:'Новое поле',
     sheet:'Лист1',
     address:'A1',
+    readMode:'value',
     type:'text',
     required:true
   };
@@ -517,6 +530,7 @@ function normSourceField(raw,index){
   out.key=safeSourceKey(src.key||out.label,`field_${index+1}`);
   out.sheet=String(src.sheet||base.sheet).trim()||base.sheet;
   out.address=String(src.address||base.address).trim()||base.address;
+  out.readMode=normSourceReadMode(src.readMode||base.readMode);
   out.type=String(src.type||base.type).trim().toLowerCase();
   if(['text','number','date'].indexOf(out.type)<0)out.type='text';
   out.required=src.required===undefined?true:!!src.required;
@@ -533,6 +547,7 @@ function mkSourceList(){
     stopMode:'empty',
     stopValue:'СТОП',
     maxItems:'200',
+    readMode:'value',
     type:'text',
     required:true
   };
@@ -550,6 +565,7 @@ function normSourceList(raw,index){
   out.stopMode=String(src.stopMode||base.stopMode).trim().toLowerCase()==='stop_value'?'stop_value':'empty';
   out.stopValue=String(src.stopValue==null?base.stopValue:src.stopValue);
   out.maxItems=String(src.maxItems||base.maxItems).trim()||base.maxItems;
+  out.readMode=normSourceReadMode(src.readMode||base.readMode);
   out.type=String(src.type||base.type).trim().toLowerCase();
   if(['text','number','date'].indexOf(out.type)<0)out.type='text';
   out.required=src.required===undefined?true:!!src.required;
@@ -589,6 +605,7 @@ function mkSourceTable(){
     keyHeader:'',
     emptyRowTolerance:'1',
     maxRows:'200',
+    readMode:'value',
     columns:[mkSourceColumn()]
   };
 }
@@ -605,6 +622,7 @@ function normSourceTable(raw,index){
   out.keyHeader=String(src.keyHeader||'').trim();
   out.emptyRowTolerance=String(src.emptyRowTolerance||base.emptyRowTolerance).trim()||base.emptyRowTolerance;
   out.maxRows=String(src.maxRows||base.maxRows).trim()||base.maxRows;
+  out.readMode=normSourceReadMode(src.readMode||base.readMode);
   out.columns=(Array.isArray(src.columns)?src.columns:[mkSourceColumn()]).map((item,colIndex)=>normSourceColumn(item,colIndex));
   if(!out.columns.length)out.columns=[mkSourceColumn()];
   return out;
@@ -2125,15 +2143,19 @@ async function load(){
 }
 
 function getItemCollapseMap(kind){
-  return kind==='action'?state.collapsedActionItems:state.collapsedInputItems;
+  if(kind==='action')return state.collapsedActionItems;
+  if(kind==='input')return state.collapsedInputItems;
+  return state.collapsedSourceItems;
 }
 function isItemCollapsed(kind,id){
-  const key=String(id||'').trim();
+  const rawId=String(id||'').trim();
+  const key=(kind==='input'||kind==='action')?rawId:`${kind}:${rawId}`;
   if(!key)return false;
   return !!getItemCollapseMap(kind)[key];
 }
 function setItemCollapsed(kind,id,collapsed){
-  const key=String(id||'').trim();
+  const rawId=String(id||'').trim();
+  const key=(kind==='input'||kind==='action')?rawId:`${kind}:${rawId}`;
   if(!key)return;
   const map=getItemCollapseMap(kind);
   if(collapsed)map[key]=true;
@@ -2145,12 +2167,82 @@ function toggleItemCollapsed(kind,id){
 function resetItemCollapsedState(){
   state.collapsedInputItems=Object.create(null);
   state.collapsedActionItems=Object.create(null);
+  state.collapsedSourceItems=Object.create(null);
+}
+function isSourceGroupCollapsed(kind){
+  return !!(state.collapsedSourceGroups&&state.collapsedSourceGroups[kind]);
+}
+function setSourceGroupCollapsed(kind,collapsed){
+  if(!state.collapsedSourceGroups)state.collapsedSourceGroups={fields:false,lists:false,tables:false};
+  state.collapsedSourceGroups[kind]=!!collapsed;
+}
+function toggleSourceGroupCollapsed(kind){
+  setSourceGroupCollapsed(kind,!isSourceGroupCollapsed(kind));
+  renderSourceConfig();
+}
+function resetSourceCollapseState(){
+  state.collapsedSourceGroups={fields:false,lists:false,tables:false};
+}
+function pluralRu(count,one,few,many){
+  const n=Math.abs(parseInt(count,10)||0)%100;
+  const n1=n%10;
+  if(n>10&&n<20)return many;
+  if(n1>1&&n1<5)return few;
+  if(n1===1)return one;
+  return many;
+}
+function summarizeInputSection(){
+  const count=Array.isArray(state.draft&&state.draft.inputFields)?state.draft.inputFields.length:0;
+  return {title:'Поля ввода перед запуском',badges:[`${count} ${pluralRu(count,'поле','поля','полей')}`]};
+}
+function summarizeSourceSection(){
+  const schemaState=getScenarioSourceSchema(state.draft);
+  return {
+    title:'Источник данных из файла',
+    badges:[
+      `${schemaState.fields.length} ${pluralRu(schemaState.fields.length,'поле','поля','полей')}`,
+      `${schemaState.lists.length} ${pluralRu(schemaState.lists.length,'список','списка','списков')}`,
+      `${schemaState.tables.length} ${pluralRu(schemaState.tables.length,'таблица','таблицы','таблиц')}`
+    ]
+  };
+}
+function summarizeActionSection(){
+  const count=Array.isArray(state.draft&&state.draft.actions)?state.draft.actions.length:0;
+  return {title:'Действия сценария',badges:[`${count} ${pluralRu(count,'действие','действия','действий')}`]};
+}
+function setSectionTitle(el,data){
+  if(!el)return;
+  const info=isObj(data)?data:{title:String(data||''),badges:[]};
+  const badges=Array.isArray(info.badges)?info.badges.filter(Boolean):[];
+  el.innerHTML='';
+  el.classList.add('section-title-with-badges');
+  const text=document.createElement('span');
+  text.className='section-title-text';
+  text.textContent=String(info.title||'').trim();
+  el.appendChild(text);
+  if(badges.length){
+    const wrap=document.createElement('span');
+    wrap.className='section-title-badges';
+    badges.forEach(label=>{
+      const badge=document.createElement('span');
+      badge.className='section-badge';
+      badge.textContent=String(label||'').trim();
+      wrap.appendChild(badge);
+    });
+    el.appendChild(wrap);
+  }
+}
+function syncSectionTitles(){
+  setSectionTitle(els.inputSectionTitle,summarizeInputSection());
+  setSectionTitle(els.sourceSectionTitle,summarizeSourceSection());
+  setSectionTitle(els.actionSectionTitle,summarizeActionSection());
 }
 
 function openModal(id){
   const src=state.scenarios.find(x=>x.id===id);
   state.draft=src?clone(src):{id:uid('scenario'),name:'',description:'',templatePath:'',actions:[],inputFields:[],sourceFileConfig:mkSourceFileConfig(),sourceSchema:mkSourceSchema(),createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),lastRunAt:null};
   resetItemCollapsedState();
+  resetSourceCollapseState();
   if(!Array.isArray(state.draft.actions))state.draft.actions=[];
   state.draft.actions=state.draft.actions.map(raw=>{
     const action=normAction(raw);
@@ -2162,24 +2254,32 @@ function openModal(id){
   state.draft.sourceFileConfig=normSourceFileConfig(state.draft.sourceFileConfig);
   state.draft.sourceSchema=normSourceSchema(state.draft.sourceSchema);
   if(src){
-    // При редактировании существующего сценария: секции открыты, элементы свернуты.
-    state.inputCollapsed=false;
-    state.actionCollapsed=false;
+    state.inputCollapsed=true;
+    state.sourceCollapsed=true;
+    state.actionCollapsed=true;
+    state.collapsedSourceGroups={fields:true,lists:true,tables:true};
     state.draft.inputFields.forEach(field=>setItemCollapsed('input',field.id,true));
     state.draft.actions.forEach(action=>setItemCollapsed('action',action.id,true));
+    state.draft.sourceSchema.fields.forEach(field=>setItemCollapsed('source-field',field.id,true));
+    state.draft.sourceSchema.lists.forEach(list=>setItemCollapsed('source-list',list.id,true));
+    state.draft.sourceSchema.tables.forEach(table=>setItemCollapsed('source-table',table.id,true));
+  }else{
+    state.inputCollapsed=false;
+    state.sourceCollapsed=false;
+    state.actionCollapsed=false;
   }
   els.title.textContent=src?'Изменение сценария':'Новый сценарий';
   els.name.value=state.draft.name; els.tpl.value=state.draft.templatePath; els.descr.value=state.draft.description;
-  renderInputFields(); renderSourceConfig(); renderActions(); syncSectionCollapseUi(); els.modal.classList.remove('hidden'); els.name.focus();
+  renderInputFields(); renderSourceConfig(); renderActions(); syncSectionCollapseUi(); syncSectionTitles(); els.modal.classList.remove('hidden'); els.name.focus();
 }
-function closeModal(){els.modal.classList.add('hidden');state.draft=null;resetItemCollapsedState();}
+function closeModal(){els.modal.classList.add('hidden');state.draft=null;resetItemCollapsedState();resetSourceCollapseState();}
 
 function setSectionCollapsed(kind,collapsed){
-  const isInput=kind==='input';
-  if(isInput)state.inputCollapsed=!!collapsed;
+  if(kind==='input')state.inputCollapsed=!!collapsed;
+  else if(kind==='source')state.sourceCollapsed=!!collapsed;
   else state.actionCollapsed=!!collapsed;
-  const body=isInput?els.inputSectionBody:els.actionSectionBody;
-  const btn=isInput?els.btnToggleInputSection:els.btnToggleActionSection;
+  const body=kind==='input'?els.inputSectionBody:(kind==='source'?els.sourceSectionBody:els.actionSectionBody);
+  const btn=kind==='input'?els.btnToggleInputSection:(kind==='source'?els.btnToggleSourceSection:els.btnToggleActionSection);
   if(body)body.classList.toggle('hidden',!!collapsed);
   if(btn){
     btn.textContent=collapsed?'Развернуть':'Свернуть';
@@ -2188,11 +2288,14 @@ function setSectionCollapsed(kind,collapsed){
 }
 function toggleSection(kind){
   if(kind==='input')setSectionCollapsed('input',!state.inputCollapsed);
+  else if(kind==='source')setSectionCollapsed('source',!state.sourceCollapsed);
   else setSectionCollapsed('action',!state.actionCollapsed);
 }
 function syncSectionCollapseUi(){
   setSectionCollapsed('input',state.inputCollapsed);
+  setSectionCollapsed('source',state.sourceCollapsed);
   setSectionCollapsed('action',state.actionCollapsed);
+  syncSectionTitles();
 }
 
 async function removeScenario(id){
@@ -2242,6 +2345,7 @@ function renderList(){
 function fieldWrap(full){const w=document.createElement('label');w.className=full?'field field-full':'field';return w;}
 function renderActions(){
   const root=els.actionList; root.innerHTML='';
+  syncSectionTitles();
   if(!state.draft||!state.draft.actions.length){const e=document.createElement('div');e.className='action-item';e.textContent='Добавьте хотя бы одно действие.';root.appendChild(e);return;}
   state.draft.actions.forEach((a,i)=>{
     if(!a.id)a.id=uid('action');
@@ -2354,6 +2458,7 @@ function renderInputFields(){
   const root=els.inputList;
   if(!root)return;
   root.innerHTML='';
+  syncSectionTitles();
   if(!state.draft||!Array.isArray(state.draft.inputFields))return;
   if(!state.draft.inputFields.length){
     const empty=document.createElement('div');
@@ -2870,13 +2975,154 @@ function renderInputFields(){
     root.appendChild(item);
   });
 }
+function sourceTypeLabel(type){
+  const normalized=String(type||'text').trim().toLowerCase();
+  if(normalized==='number')return 'Число';
+  if(normalized==='date')return 'Дата';
+  return 'Текст';
+}
+function sourceFieldSummary(field){
+  const parts=[`${field.sheet}:${field.address}`,sourceReadModeLabel(field.readMode),sourceTypeLabel(field.type)];
+  if(field.required)parts.push('обязательно');
+  return parts.join(' · ');
+}
+function sourceListSummary(list){
+  const stop=list.stopMode==='stop_value'&&String(list.stopValue||'').trim()?`до «${list.stopValue}»`:'до пустой ячейки';
+  const parts=[`${list.sheet}:${list.startAddress}`,list.direction==='right'?'вправо':'вниз',stop,sourceReadModeLabel(list.readMode),sourceTypeLabel(list.type)];
+  if(list.required)parts.push('обязательно');
+  return parts.join(' · ');
+}
+function sourceTableSummary(table){
+  const parts=[table.sheet,`заголовки ${table.headerRow}`,`смещение ${table.startRowOffset}`,sourceReadModeLabel(table.readMode),`колонок ${Array.isArray(table.columns)?table.columns.length:0}`];
+  return parts.join(' · ');
+}
 function renderSourceConfig(){
   const root=els.sourceConfigRoot;
   if(!root)return;
   root.innerHTML='';
+  syncSectionTitles();
   if(!state.draft)return;
   const config=state.draft.sourceFileConfig=normSourceFileConfig(state.draft.sourceFileConfig);
   const schemaState=state.draft.sourceSchema=normSourceSchema(state.draft.sourceSchema);
+
+  const createSelect=(value,options,apply)=>{
+    const inp=document.createElement('select');
+    (options||[]).forEach(opt=>{
+      const o=document.createElement('option');
+      o.value=opt[0];
+      o.textContent=opt[1];
+      if(opt[0]===value)o.selected=true;
+      inp.appendChild(o);
+    });
+    inp.onchange=(ev)=>apply(ev.target.value);
+    return inp;
+  };
+  const createFieldControl=(container,label,value,apply,placeholder,type,options)=>{
+    const wrap=document.createElement('label');
+    wrap.className='field';
+    const cap=document.createElement('span');
+    cap.textContent=label;
+    let inp;
+    if(type==='select'){
+      inp=createSelect(value,options,apply);
+    }else if(type==='check'){
+      inp=document.createElement('input');
+      inp.type='checkbox';
+      inp.checked=!!value;
+      inp.onchange=(ev)=>apply(!!ev.target.checked);
+    }else{
+      inp=document.createElement('input');
+      inp.type=type||'text';
+      inp.value=value;
+      if(placeholder)inp.placeholder=placeholder;
+      inp.oninput=(ev)=>apply(ev.target.value);
+    }
+    wrap.appendChild(cap);
+    wrap.appendChild(inp);
+    container.appendChild(wrap);
+    return inp;
+  };
+  const makeGroup=(kind,titleText,count,emptyText)=>{
+    const block=document.createElement('div');
+    block.className='source-section-block';
+    if(isSourceGroupCollapsed(kind))block.classList.add('item-collapsed');
+    const headRow=document.createElement('div');
+    headRow.className='source-item-head source-section-head';
+    const left=document.createElement('div');
+    left.className='source-section-head-main';
+    const title=document.createElement('h4');
+    title.className='source-section-title';
+    title.textContent=titleText;
+    const meta=document.createElement('div');
+    meta.className='source-config-meta';
+    meta.textContent=`Кол-во: ${count}`;
+    left.appendChild(title);
+    left.appendChild(meta);
+    const tools=document.createElement('div');
+    tools.className='source-item-tools';
+    const toggle=document.createElement('button');
+    toggle.type='button';
+    toggle.className='btn btn-ghost';
+    toggle.textContent=isSourceGroupCollapsed(kind)?'Развернуть':'Свернуть';
+    toggle.onclick=()=>toggleSourceGroupCollapsed(kind);
+    tools.appendChild(toggle);
+    headRow.appendChild(left);
+    headRow.appendChild(tools);
+    block.appendChild(headRow);
+    const body=document.createElement('div');
+    body.className='source-section-body';
+    if(isSourceGroupCollapsed(kind))body.classList.add('hidden');
+    if(!count){
+      const empty=document.createElement('div');
+      empty.className='source-empty';
+      empty.textContent=emptyText;
+      body.appendChild(empty);
+    }
+    block.appendChild(body);
+    return {block,body};
+  };
+  const makeSourceItem=(kind,id,titleText,summaryText,onDelete,extraButtons,bodyBuilder)=>{
+    const item=document.createElement('div');
+    item.className='source-item';
+    const collapsed=isItemCollapsed(kind,id);
+    if(collapsed)item.classList.add('item-collapsed');
+    const headRow=document.createElement('div');
+    headRow.className='source-item-head';
+    const left=document.createElement('div');
+    left.className='source-section-head-main';
+    const title=document.createElement('div');
+    title.className='source-item-title';
+    title.textContent=titleText;
+    left.appendChild(title);
+    if(collapsed){
+      const note=document.createElement('div');
+      note.className='item-collapsed-note';
+      note.textContent=summaryText;
+      left.appendChild(note);
+    }
+    const tools=document.createElement('div');
+    tools.className='source-item-tools';
+    const toggle=document.createElement('button');
+    toggle.type='button';
+    toggle.className='btn btn-ghost';
+    toggle.textContent=collapsed?'Развернуть':'Свернуть';
+    toggle.onclick=()=>{toggleItemCollapsed(kind,id);renderSourceConfig();};
+    tools.appendChild(toggle);
+    (extraButtons||[]).forEach(btn=>tools.appendChild(btn));
+    const del=document.createElement('button');
+    del.type='button';
+    del.className='btn btn-danger';
+    del.textContent='Удалить';
+    del.onclick=onDelete;
+    tools.appendChild(del);
+    headRow.appendChild(left);
+    headRow.appendChild(tools);
+    item.appendChild(headRow);
+    if(!collapsed){
+      bodyBuilder(item,title);
+    }
+    return item;
+  };
 
   const head=document.createElement('div');
   head.className='source-config-head';
@@ -2897,29 +3143,14 @@ function renderSourceConfig(){
   head.appendChild(meta);
   root.appendChild(head);
 
-  if(!config.enabled)return;
+  if(!config.enabled){syncSectionTitles();return;}
 
   const cfgGrid=document.createElement('div');
   cfgGrid.className='form-grid';
-  const addConfigField=(label,value,apply,placeholder,type)=>{
-    const wrap=document.createElement('label');
-    wrap.className='field';
-    const cap=document.createElement('span');
-    cap.textContent=label;
-    const inp=document.createElement('input');
-    inp.type=type||'text';
-    inp.value=value;
-    if(placeholder)inp.placeholder=placeholder;
-    inp.oninput=(ev)=>apply(ev.target.value);
-    wrap.appendChild(cap);
-    wrap.appendChild(inp);
-    cfgGrid.appendChild(wrap);
-  };
-  addConfigField('Название блока',config.label,(v)=>{config.label=v;},'Файл с исходными данными');
-  addConfigField('Максимум строк по умолчанию',String(config.maxRowsDefault),(v)=>{config.maxRowsDefault=v;},'', 'number');
-  addConfigField('Лимит размера файла (MB)',String(config.maxFileSizeMb),(v)=>{config.maxFileSizeMb=v;},'', 'number');
-  addConfigField('Строк предпросмотра',String(config.previewRows),(v)=>{config.previewRows=v;},'', 'number');
-
+  createFieldControl(cfgGrid,'Название блока',config.label,(v)=>{config.label=v;syncSectionTitles();},'Файл с исходными данными');
+  createFieldControl(cfgGrid,'Максимум строк по умолчанию',String(config.maxRowsDefault),(v)=>{config.maxRowsDefault=v;},'', 'number');
+  createFieldControl(cfgGrid,'Лимит размера файла (MB)',String(config.maxFileSizeMb),(v)=>{config.maxFileSizeMb=v;},'', 'number');
+  createFieldControl(cfgGrid,'Строк предпросмотра',String(config.previewRows),(v)=>{config.previewRows=v;},'', 'number');
   const checks=document.createElement('div');
   checks.className='field field-full';
   const checksRow=document.createElement('div');
@@ -2941,286 +3172,105 @@ function renderSourceConfig(){
   cfgGrid.appendChild(checks);
   root.appendChild(cfgGrid);
 
-  const fieldsWrap=document.createElement('div');
-  fieldsWrap.className='source-section-block';
-  const fieldsTitle=document.createElement('h4');
-  fieldsTitle.className='source-section-title';
-  fieldsTitle.textContent='Поля из файла';
-  fieldsWrap.appendChild(fieldsTitle);
-  if(!schemaState.fields.length){
-    const empty=document.createElement('div');
-    empty.className='source-empty';
-    empty.textContent='Поля файла не настроены.';
-    fieldsWrap.appendChild(empty);
-  }
+  const fieldsGroup=makeGroup('fields','Поля из файла',schemaState.fields.length,'Поля файла не настроены.');
   schemaState.fields.forEach((field,index)=>{
-    const item=document.createElement('div');
-    item.className='source-item';
-    const headRow=document.createElement('div');
-    headRow.className='source-item-head';
-    const title=document.createElement('div');
-    title.className='source-item-title';
-    title.textContent=field.label;
-    const tools=document.createElement('div');
-    tools.className='source-item-tools';
-    const del=document.createElement('button');
-    del.type='button';
-    del.className='btn btn-danger';
-    del.textContent='Удалить';
-    del.onclick=()=>{schemaState.fields.splice(index,1);renderSourceConfig();renderActions();};
-    tools.appendChild(del);
-    headRow.appendChild(title);
-    headRow.appendChild(tools);
-    item.appendChild(headRow);
-
-    const grid=document.createElement('div');
-    grid.className='form-grid';
-    const addField=(label,value,apply,placeholder,type)=>{
-      const wrap=document.createElement('label');
-      wrap.className='field';
-      const cap=document.createElement('span');
-      cap.textContent=label;
-      let inp;
-      if(type==='select'){
-        inp=document.createElement('select');
-        [['text','Текст'],['number','Число'],['date','Дата']].forEach(opt=>{
-          const o=document.createElement('option');
-          o.value=opt[0];
-          o.textContent=opt[1];
-          if(opt[0]===value)o.selected=true;
-          inp.appendChild(o);
-        });
-        inp.onchange=(ev)=>apply(ev.target.value);
-      }else if(type==='check'){
-        inp=document.createElement('input');
-        inp.type='checkbox';
-        inp.checked=!!value;
-        inp.onchange=(ev)=>apply(!!ev.target.checked);
-      }else{
-        inp=document.createElement('input');
-        inp.type=type||'text';
-        inp.value=value;
-        if(placeholder)inp.placeholder=placeholder;
-        inp.oninput=(ev)=>apply(ev.target.value);
-      }
-      wrap.appendChild(cap);
-      wrap.appendChild(inp);
-      grid.appendChild(wrap);
-    };
-    addField('Название',field.label,(v)=>{field.label=v;title.textContent=String(v||'').trim()||`Поле ${index+1}`;});
-    addField('Ключ поля',field.key,(v)=>{field.key=safeSourceKey(v,`field_${index+1}`);});
-    addField('Лист',field.sheet,(v)=>{field.sheet=v;},'Лист1');
-    addField('Ячейка',field.address,(v)=>{field.address=v;},'B2');
-    addField('Тип значения',field.type,(v)=>{field.type=v;},'', 'select');
-    addField('Обязательное',field.required,(v)=>{field.required=!!v;},'', 'check');
-    item.appendChild(grid);
-    fieldsWrap.appendChild(item);
+    fieldsGroup.body.appendChild(makeSourceItem('source-field',field.id,field.label,sourceFieldSummary(field),()=>{
+      schemaState.fields.splice(index,1);
+      renderSourceConfig();
+      renderActions();
+    },[],(item,title)=>{
+      const grid=document.createElement('div');
+      grid.className='form-grid';
+      createFieldControl(grid,'Название',field.label,(v)=>{field.label=v;title.textContent=String(v||'').trim()||`Поле ${index+1}`;syncSectionTitles();});
+      createFieldControl(grid,'Ключ поля',field.key,(v)=>{field.key=safeSourceKey(v,`field_${index+1}`);});
+      createFieldControl(grid,'Лист',field.sheet,(v)=>{field.sheet=v;},'Лист1');
+      createFieldControl(grid,'Ячейка',field.address,(v)=>{field.address=v;},'B2');
+      createFieldControl(grid,'Брать из ячейки',field.readMode,(v)=>{field.readMode=normSourceReadMode(v);},'', 'select', SOURCE_READ_MODE_OPTIONS);
+      createFieldControl(grid,'Тип значения',field.type,(v)=>{field.type=v;},'', 'select', [['text','Текст'],['number','Число'],['date','Дата']]);
+      createFieldControl(grid,'Обязательное',field.required,(v)=>{field.required=!!v;},'', 'check');
+      item.appendChild(grid);
+    }));
   });
-  root.appendChild(fieldsWrap);
+  root.appendChild(fieldsGroup.block);
 
-  const listsWrap=document.createElement('div');
-  listsWrap.className='source-section-block';
-  const listsTitle=document.createElement('h4');
-  listsTitle.className='source-section-title';
-  listsTitle.textContent='Списки из файла';
-  listsWrap.appendChild(listsTitle);
-  if(!schemaState.lists.length){
-    const empty=document.createElement('div');
-    empty.className='source-empty';
-    empty.textContent='Списки файла не настроены.';
-    listsWrap.appendChild(empty);
-  }
+  const listsGroup=makeGroup('lists','Списки из файла',schemaState.lists.length,'Списки файла не настроены.');
   schemaState.lists.forEach((list,index)=>{
-    const item=document.createElement('div');
-    item.className='source-item';
-    const headRow=document.createElement('div');
-    headRow.className='source-item-head';
-    const title=document.createElement('div');
-    title.className='source-item-title';
-    title.textContent=list.label;
-    const tools=document.createElement('div');
-    tools.className='source-item-tools';
-    const del=document.createElement('button');
-    del.type='button';
-    del.className='btn btn-danger';
-    del.textContent='Удалить';
-    del.onclick=()=>{schemaState.lists.splice(index,1);renderSourceConfig();renderActions();};
-    tools.appendChild(del);
-    headRow.appendChild(title);
-    headRow.appendChild(tools);
-    item.appendChild(headRow);
-
-    const grid=document.createElement('div');
-    grid.className='form-grid';
-    const addField=(label,value,apply,placeholder,type,options)=>{
-      const wrap=document.createElement('label');
-      wrap.className='field';
-      const cap=document.createElement('span');
-      cap.textContent=label;
-      let inp;
-      if(type==='select'){
-        inp=document.createElement('select');
-        (options||[]).forEach(opt=>{
-          const o=document.createElement('option');
-          o.value=opt[0];
-          o.textContent=opt[1];
-          if(opt[0]===value)o.selected=true;
-          inp.appendChild(o);
-        });
-        inp.onchange=(ev)=>apply(ev.target.value);
-      }else if(type==='check'){
-        inp=document.createElement('input');
-        inp.type='checkbox';
-        inp.checked=!!value;
-        inp.onchange=(ev)=>apply(!!ev.target.checked);
-      }else{
-        inp=document.createElement('input');
-        inp.type=type||'text';
-        inp.value=value;
-        if(placeholder)inp.placeholder=placeholder;
-        inp.oninput=(ev)=>apply(ev.target.value);
+    listsGroup.body.appendChild(makeSourceItem('source-list',list.id,list.label,sourceListSummary(list),()=>{
+      schemaState.lists.splice(index,1);
+      renderSourceConfig();
+      renderActions();
+    },[],(item,title)=>{
+      const grid=document.createElement('div');
+      grid.className='form-grid';
+      const stopModeOptions=[['empty','До пустой ячейки'],['stop_value','До стоп-значения']];
+      createFieldControl(grid,'Название списка',list.label,(v)=>{list.label=v;title.textContent=String(v||'').trim()||`Список ${index+1}`;syncSectionTitles();});
+      createFieldControl(grid,'Ключ списка',list.key,(v)=>{list.key=safeSourceKey(v,`list_${index+1}`);});
+      createFieldControl(grid,'Лист',list.sheet,(v)=>{list.sheet=v;},'Лист1');
+      createFieldControl(grid,'Стартовая ячейка',list.startAddress,(v)=>{list.startAddress=v;},'A1');
+      createFieldControl(grid,'Направление чтения',list.direction,(v)=>{list.direction=v;},'', 'select', [['down','Вниз'],['right','Вправо']]);
+      createFieldControl(grid,'Граница чтения',list.stopMode,(v)=>{list.stopMode=v;renderSourceConfig();},'', 'select', stopModeOptions);
+      if(list.stopMode==='stop_value'){
+        createFieldControl(grid,'Стоп-значение',list.stopValue,(v)=>{list.stopValue=v;},'СТОП');
       }
-      wrap.appendChild(cap);
-      wrap.appendChild(inp);
-      grid.appendChild(wrap);
-      return inp;
-    };
-    const stopModeOptions=[['empty','До пустой ячейки'],['stop_value','До стоп-значения']];
-    addField('Название списка',list.label,(v)=>{list.label=v;title.textContent=String(v||'').trim()||`Список ${index+1}`;});
-    addField('Ключ списка',list.key,(v)=>{list.key=safeSourceKey(v,`list_${index+1}`);});
-    addField('Лист',list.sheet,(v)=>{list.sheet=v;},'Лист1');
-    addField('Стартовая ячейка',list.startAddress,(v)=>{list.startAddress=v;},'A1');
-    addField('Направление чтения',list.direction,(v)=>{list.direction=v;},'', 'select', [['down','Вниз'],['right','Вправо']]);
-    addField('Граница чтения',list.stopMode,(v)=>{list.stopMode=v;renderSourceConfig();},'', 'select', stopModeOptions);
-    addField('Стоп-значение',list.stopValue,(v)=>{list.stopValue=v;},'СТОП');
-    addField('Максимум элементов',list.maxItems,(v)=>{list.maxItems=v;},String(config.maxRowsDefault),'number');
-    addField('Тип значения',list.type,(v)=>{list.type=v;},'', 'select', [['text','Текст'],['number','Число'],['date','Дата']]);
-    addField('Обязательное',list.required,(v)=>{list.required=!!v;},'', 'check');
-    item.appendChild(grid);
-    listsWrap.appendChild(item);
+      createFieldControl(grid,'Максимум элементов',list.maxItems,(v)=>{list.maxItems=v;},String(config.maxRowsDefault),'number');
+      createFieldControl(grid,'Брать из ячейки',list.readMode,(v)=>{list.readMode=normSourceReadMode(v);},'', 'select', SOURCE_READ_MODE_OPTIONS);
+      createFieldControl(grid,'Тип значения',list.type,(v)=>{list.type=v;},'', 'select', [['text','Текст'],['number','Число'],['date','Дата']]);
+      createFieldControl(grid,'Обязательное',list.required,(v)=>{list.required=!!v;},'', 'check');
+      item.appendChild(grid);
+    }));
   });
-  root.appendChild(listsWrap);
+  root.appendChild(listsGroup.block);
 
-  const tablesWrap=document.createElement('div');
-  tablesWrap.className='source-section-block';
-  const tablesTitle=document.createElement('h4');
-  tablesTitle.className='source-section-title';
-  tablesTitle.textContent='Таблицы из файла';
-  tablesWrap.appendChild(tablesTitle);
-  if(!schemaState.tables.length){
-    const empty=document.createElement('div');
-    empty.className='source-empty';
-    empty.textContent='Таблицы файла не настроены.';
-    tablesWrap.appendChild(empty);
-  }
+  const tablesGroup=makeGroup('tables','Таблицы из файла',schemaState.tables.length,'Таблицы файла не настроены.');
   schemaState.tables.forEach((table,index)=>{
-    const item=document.createElement('div');
-    item.className='source-item';
-    const headRow=document.createElement('div');
-    headRow.className='source-item-head';
-    const title=document.createElement('div');
-    title.className='source-item-title';
-    title.textContent=table.label;
-    const tools=document.createElement('div');
-    tools.className='source-item-tools';
     const addColumn=document.createElement('button');
     addColumn.type='button';
     addColumn.className='btn btn-secondary';
     addColumn.textContent='Колонка';
-    addColumn.onclick=()=>{table.columns.push(mkSourceColumn());renderSourceConfig();};
-    const del=document.createElement('button');
-    del.type='button';
-    del.className='btn btn-danger';
-    del.textContent='Удалить';
-    del.onclick=()=>{schemaState.tables.splice(index,1);renderSourceConfig();renderActions();};
-    tools.appendChild(addColumn);
-    tools.appendChild(del);
-    headRow.appendChild(title);
-    headRow.appendChild(tools);
-    item.appendChild(headRow);
+    addColumn.onclick=()=>{table.columns.push(mkSourceColumn());setItemCollapsed('source-table',table.id,false);renderSourceConfig();};
+    tablesGroup.body.appendChild(makeSourceItem('source-table',table.id,table.label,sourceTableSummary(table),()=>{
+      schemaState.tables.splice(index,1);
+      renderSourceConfig();
+      renderActions();
+    },[addColumn],(item,title)=>{
+      const grid=document.createElement('div');
+      grid.className='form-grid';
+      createFieldControl(grid,'Название таблицы',table.label,(v)=>{table.label=v;title.textContent=String(v||'').trim()||`Таблица ${index+1}`;syncSectionTitles();});
+      createFieldControl(grid,'Ключ таблицы',table.key,(v)=>{table.key=safeSourceKey(v,`table_${index+1}`);});
+      createFieldControl(grid,'Лист',table.sheet,(v)=>{table.sheet=v;},'Лист1');
+      createFieldControl(grid,'Строка заголовков',table.headerRow,(v)=>{table.headerRow=v;},'6','number');
+      createFieldControl(grid,'Смещение до данных',table.startRowOffset,(v)=>{table.startRowOffset=v;},'1','number');
+      createFieldControl(grid,'Заголовок ключевой колонки',table.keyHeader,(v)=>{table.keyHeader=v;},'Номер');
+      createFieldControl(grid,'Пустых строк подряд',table.emptyRowTolerance,(v)=>{table.emptyRowTolerance=v;},'1','number');
+      createFieldControl(grid,'Максимум строк',table.maxRows,(v)=>{table.maxRows=v;},String(config.maxRowsDefault),'number');
+      createFieldControl(grid,'Брать из ячейки',table.readMode,(v)=>{table.readMode=normSourceReadMode(v);},'', 'select', SOURCE_READ_MODE_OPTIONS);
+      item.appendChild(grid);
 
-    const grid=document.createElement('div');
-    grid.className='form-grid';
-    const addField=(label,value,apply,placeholder,type)=>{
-      const wrap=document.createElement('label');
-      wrap.className='field';
-      const cap=document.createElement('span');
-      cap.textContent=label;
-      const inp=document.createElement('input');
-      inp.type=type||'text';
-      inp.value=value;
-      if(placeholder)inp.placeholder=placeholder;
-      inp.oninput=(ev)=>apply(ev.target.value);
-      wrap.appendChild(cap);
-      wrap.appendChild(inp);
-      grid.appendChild(wrap);
-    };
-    addField('Название таблицы',table.label,(v)=>{table.label=v;title.textContent=String(v||'').trim()||`Таблица ${index+1}`;});
-    addField('Ключ таблицы',table.key,(v)=>{table.key=safeSourceKey(v,`table_${index+1}`);});
-    addField('Лист',table.sheet,(v)=>{table.sheet=v;},'Лист1');
-    addField('Строка заголовков',table.headerRow,(v)=>{table.headerRow=v;},'6','number');
-    addField('Смещение до данных',table.startRowOffset,(v)=>{table.startRowOffset=v;},'1','number');
-    addField('Заголовок ключевой колонки',table.keyHeader,(v)=>{table.keyHeader=v;},'Номер');
-    addField('Пустых строк подряд',table.emptyRowTolerance,(v)=>{table.emptyRowTolerance=v;},'1','number');
-    addField('Максимум строк',table.maxRows,(v)=>{table.maxRows=v;},String(config.maxRowsDefault),'number');
-    item.appendChild(grid);
-
-    const columnsWrap=document.createElement('div');
-    columnsWrap.className='source-columns-list';
-    table.columns.forEach((column,colIndex)=>{
-      const row=document.createElement('div');
-      row.className='source-column-row';
-      const makeField=(label,value,apply,placeholder,type)=>{
-        const wrap=document.createElement('label');
-        wrap.className='field';
-        const cap=document.createElement('span');
-        cap.textContent=label;
-        let inp;
-        if(type==='select'){
-          inp=document.createElement('select');
-          [['text','Текст'],['number','Число'],['date','Дата']].forEach(opt=>{
-            const o=document.createElement('option');
-            o.value=opt[0];
-            o.textContent=opt[1];
-            if(opt[0]===value)o.selected=true;
-            inp.appendChild(o);
-          });
-          inp.onchange=(ev)=>apply(ev.target.value);
-        }else if(type==='check'){
-          inp=document.createElement('input');
-          inp.type='checkbox';
-          inp.checked=!!value;
-          inp.onchange=(ev)=>apply(!!ev.target.checked);
-        }else{
-          inp=document.createElement('input');
-          inp.type=type||'text';
-          inp.value=value;
-          if(placeholder)inp.placeholder=placeholder;
-          inp.oninput=(ev)=>apply(ev.target.value);
-        }
-        wrap.appendChild(cap);
-        wrap.appendChild(inp);
-        row.appendChild(wrap);
-      };
-      makeField('Название',column.label,(v)=>{column.label=v;},'Номер');
-      makeField('Ключ',column.key,(v)=>{column.key=safeSourceKey(v,`column_${colIndex+1}`);});
-      makeField('Заголовок в файле',column.header,(v)=>{column.header=v;},'Номер');
-      makeField('Тип',column.type,(v)=>{column.type=v;},'', 'select');
-      const actionWrap=document.createElement('div');
-      actionWrap.className='source-inline-actions';
-      const delCol=document.createElement('button');
-      delCol.type='button';
-      delCol.className='btn btn-danger';
-      delCol.textContent='-';
-      delCol.onclick=()=>{table.columns.splice(colIndex,1);if(!table.columns.length)table.columns.push(mkSourceColumn());renderSourceConfig();};
-      actionWrap.appendChild(delCol);
-      row.appendChild(actionWrap);
-      columnsWrap.appendChild(row);
-    });
-    item.appendChild(columnsWrap);
-    tablesWrap.appendChild(item);
+      const columnsWrap=document.createElement('div');
+      columnsWrap.className='source-columns-list';
+      table.columns.forEach((column,colIndex)=>{
+        const row=document.createElement('div');
+        row.className='source-column-row';
+        createFieldControl(row,'Название',column.label,(v)=>{column.label=v;},'Номер');
+        createFieldControl(row,'Ключ',column.key,(v)=>{column.key=safeSourceKey(v,`column_${colIndex+1}`);});
+        createFieldControl(row,'Заголовок в файле',column.header,(v)=>{column.header=v;},'Номер');
+        createFieldControl(row,'Тип',column.type,(v)=>{column.type=v;},'', 'select', [['text','Текст'],['number','Число'],['date','Дата']]);
+        const actionWrap=document.createElement('div');
+        actionWrap.className='source-inline-actions';
+        const delCol=document.createElement('button');
+        delCol.type='button';
+        delCol.className='btn btn-danger';
+        delCol.textContent='-';
+        delCol.onclick=()=>{table.columns.splice(colIndex,1);if(!table.columns.length)table.columns.push(mkSourceColumn());renderSourceConfig();};
+        actionWrap.appendChild(delCol);
+        row.appendChild(actionWrap);
+        columnsWrap.appendChild(row);
+      });
+      item.appendChild(columnsWrap);
+    }));
   });
-  root.appendChild(tablesWrap);
+  root.appendChild(tablesGroup.block);
+  syncSectionTitles();
 }
 function readDraft(){if(!state.draft)return;state.draft.name=String(els.name.value||'').trim();state.draft.templatePath=String(els.tpl.value||'').trim();state.draft.description=String(els.descr.value||'').trim();}
 function validateDraft(){
@@ -4811,7 +4861,8 @@ function sourceProbeLookup(items,key){
   }
   return null;
 }
-function sourceValueModeJs(type,value){
+function sourceValueModeJs(type,value,readMode){
+  if(normSourceReadMode(readMode)==='formula'&&typeof value==='string'&&value.trim().charAt(0)==='=')return 'formula';
   const normalized=String(type||'text').trim().toLowerCase();
   if(normalized==='number')return (value===''||value===null||value===undefined||Number.isNaN(Number(value)))?'text':'number';
   if(normalized==='date'&&typeof value==='number')return 'number';
@@ -4930,7 +4981,7 @@ function expandSourceActions(actions,sourceProbeResult){
       bindings.forEach(target=>{
         const shiftedRange=shiftRangeByInsertEvents(insertEvents,target.sheet,target.range);
         const range=shiftedRange?formatA1Range(shiftedRange):String(target.range||'').trim();
-        out.push(makeRuntimeSetCellAction(action,target.sheet,range,sourceField.value,sourceValueModeJs(sourceField.type,sourceField.value)));
+        out.push(makeRuntimeSetCellAction(action,target.sheet,range,sourceField.value,sourceValueModeJs(sourceField.type,sourceField.value,sourceField.readMode)));
       });
       continue;
     }
@@ -4961,7 +5012,7 @@ function expandSourceActions(actions,sourceProbeResult){
             const copyAction=makeRuntimeCopyTemplateRowAction(binding.sheet,templateRowRange,targetRow);
             if(copyAction)out.push(copyAction);
           }
-          out.push(makeRuntimeSetCellAction(action,binding.sheet,`${numberToColLetters(anchor.c1)}${targetRow}`,items[itemIndex],sourceValueModeJs(sourceList.type,items[itemIndex])));
+          out.push(makeRuntimeSetCellAction(action,binding.sheet,`${numberToColLetters(anchor.c1)}${targetRow}`,items[itemIndex],sourceValueModeJs(sourceList.type,items[itemIndex],sourceList.readMode)));
         }
       });
       continue;
@@ -5001,7 +5052,7 @@ function expandSourceActions(actions,sourceProbeResult){
           const row=rows[rowIndex]&&typeof rows[rowIndex]==='object'?rows[rowIndex]:{};
           parsedMappings.items.forEach(mapping=>{
             const cellValue=row[mapping.sourceKey];
-            out.push(makeRuntimeSetCellAction(action,binding.sheet,`${mapping.targetColumn}${targetRow}`,cellValue,sourceValueModeJs(columnTypes[mapping.sourceKey],cellValue)));
+            out.push(makeRuntimeSetCellAction(action,binding.sheet,`${mapping.targetColumn}${targetRow}`,cellValue,sourceValueModeJs(columnTypes[mapping.sourceKey],cellValue,sourceTable.readMode)));
           });
         }
       });
@@ -5138,9 +5189,9 @@ function bind(){
   els.btnSave&&els.btnSave.addEventListener('click',saveDraft);
   const addInputField=()=>{if(!state.draft)return;state.draft.inputFields.push(mkInputField());renderInputFields();};
   const addAction=()=>{if(!state.draft)return;state.draft.actions.push(mkAction('set_cell_value'));renderActions();};
-  const addSourceField=()=>{if(!state.draft)return;state.draft.sourceSchema.fields.push(mkSourceField());renderSourceConfig();renderActions();};
-  const addSourceList=()=>{if(!state.draft)return;state.draft.sourceSchema.lists.push(mkSourceList());renderSourceConfig();renderActions();};
-  const addSourceTable=()=>{if(!state.draft)return;state.draft.sourceSchema.tables.push(mkSourceTable());renderSourceConfig();renderActions();};
+  const addSourceField=()=>{if(!state.draft)return;const item=mkSourceField();state.draft.sourceSchema.fields.push(item);state.sourceCollapsed=false;setSourceGroupCollapsed('fields',false);setItemCollapsed('source-field',item.id,false);renderSourceConfig();renderActions();};
+  const addSourceList=()=>{if(!state.draft)return;const item=mkSourceList();state.draft.sourceSchema.lists.push(item);state.sourceCollapsed=false;setSourceGroupCollapsed('lists',false);setItemCollapsed('source-list',item.id,false);renderSourceConfig();renderActions();};
+  const addSourceTable=()=>{if(!state.draft)return;const item=mkSourceTable();state.draft.sourceSchema.tables.push(item);state.sourceCollapsed=false;setSourceGroupCollapsed('tables',false);setItemCollapsed('source-table',item.id,false);renderSourceConfig();renderActions();};
   els.btnAddInputField&&els.btnAddInputField.addEventListener('click',addInputField);
   els.btnAddInputFieldBottom&&els.btnAddInputFieldBottom.addEventListener('click',addInputField);
   els.btnAddAction&&els.btnAddAction.addEventListener('click',addAction);
@@ -5149,6 +5200,7 @@ function bind(){
   els.btnAddSourceList&&els.btnAddSourceList.addEventListener('click',addSourceList);
   els.btnAddSourceTable&&els.btnAddSourceTable.addEventListener('click',addSourceTable);
   els.btnToggleInputSection&&els.btnToggleInputSection.addEventListener('click',()=>toggleSection('input'));
+  els.btnToggleSourceSection&&els.btnToggleSourceSection.addEventListener('click',()=>toggleSection('source'));
   els.btnToggleActionSection&&els.btnToggleActionSection.addEventListener('click',()=>toggleSection('action'));
   els.btnPick&&els.btnPick.addEventListener('click',pickTemplate);
   els.btnRunInputCancel&&els.btnRunInputCancel.addEventListener('click',()=>closeRunInputModal(null));

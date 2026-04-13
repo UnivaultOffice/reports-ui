@@ -69,7 +69,7 @@
 
       <section class="modal-section">
         <div class="section-head">
-          <h3>Поля ввода перед запуском</h3>
+          <h3 id="input-section-title">Поля ввода перед запуском</h3>
           <div class="section-actions">
             <button id="btn-add-input-field" class="btn btn-secondary" type="button">Добавить поле</button>
             <button id="btn-toggle-input-section" class="btn btn-ghost" type="button" aria-expanded="true">Свернуть</button>
@@ -86,14 +86,15 @@
 
       <section class="modal-section">
         <div class="section-head">
-          <h3>Источник данных из файла</h3>
+          <h3 id="source-section-title">Источник данных из файла</h3>
           <div class="section-actions">
             <button id="btn-add-source-field" class="btn btn-secondary" type="button">Добавить поле</button>
             <button id="btn-add-source-list" class="btn btn-secondary" type="button">Добавить список</button>
             <button id="btn-add-source-table" class="btn btn-secondary" type="button">Добавить таблицу</button>
+            <button id="btn-toggle-source-section" class="btn btn-ghost" type="button" aria-expanded="true">Свернуть</button>
           </div>
         </div>
-        <div class="section-body">
+        <div id="source-section-body" class="section-body">
           <p class="section-note">Настройка чтения входного файла `.xlsx` или `.xls` перед генерацией.</p>
           <div id="source-config-root" class="source-config-root"></div>
         </div>
@@ -101,7 +102,7 @@
 
       <section class="modal-section">
         <div class="section-head">
-          <h3>Действия сценария</h3>
+          <h3 id="action-section-title">Действия сценария</h3>
           <div class="section-actions">
             <button id="btn-add-action" class="btn btn-secondary" type="button">Добавить действие</button>
             <button id="btn-toggle-action-section" class="btn btn-ghost" type="button" aria-expanded="true">Свернуть</button>

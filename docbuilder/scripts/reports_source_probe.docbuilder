@@ -38,6 +38,10 @@ function normalizeType(value) {
     return type;
 }
 
+function normalizeReadMode(value) {
+    return safeString(value || "value").trim().toLowerCase() === "formula" ? "formula" : "value";
+}
+
 function colToNumber(value) {
     var text = safeString(value).toUpperCase().replace(/[^A-Z]/g, "");
     var out = 0;
@@ -105,12 +109,14 @@ function getRange(sheet, address) {
     return sheet.GetRange(safeString(address).trim() || "A1");
 }
 
-function readCell(sheet, address, type) {
+function readCell(sheet, address, type, readMode) {
     var range = getRange(sheet, address);
     var raw = "";
     var text = "";
+    var formula = "";
     var parsed = "";
     var normalizedType = normalizeType(type);
+    var normalizedReadMode = normalizeReadMode(readMode);
 
     try {
         raw = range.GetValue();
@@ -121,6 +127,19 @@ function readCell(sheet, address, type) {
         text = range.GetText();
     } catch (eText) {
         text = safeString(raw);
+    }
+    try {
+        formula = safeString(range.GetFormula()).trim();
+    } catch (eFormula) {
+        formula = "";
+    }
+
+    if (normalizedReadMode === "formula" && formula && formula.charAt(0) === "=") {
+        return {
+            value: formula,
+            displayValue: formula,
+            formulaValue: formula
+        };
     }
 
     if (normalizedType === "number") {
@@ -139,7 +158,8 @@ function readCell(sheet, address, type) {
 
     return {
         value: parsed,
-        displayValue: safeString(text || raw).trim()
+        displayValue: safeString(text || raw).trim(),
+        formulaValue: formula
     };
 }
 
@@ -169,6 +189,7 @@ function readFields() {
     var field;
     var sheet;
     var type;
+    var readMode;
     var label;
     var key;
     var address;
@@ -181,13 +202,14 @@ function readFields() {
         sheet = getSheet(field.sheet || "Sheet1");
         address = safeString(field.address || "A1");
         type = normalizeType(field.type);
+        readMode = normalizeReadMode(field.readMode);
 
         if (!sheet) {
             errors.push(makeError("sheet_not_found", "Sheet not found: " + safeString(field.sheet || "Sheet1")));
             continue;
         }
 
-        cell = readCell(sheet, address, type);
+        cell = readCell(sheet, address, type, readMode);
         if (!(field && field.required === false) && !isFilled(cell.value, type))
             errors.push(makeError("required_field_empty", "Required field is empty: " + label));
 
@@ -195,10 +217,12 @@ function readFields() {
             key: key,
             label: label,
             type: type,
+            readMode: readMode,
             sheet: safeString(field.sheet || "Sheet1"),
             address: address,
             value: cell.value,
-            displayValue: cell.displayValue
+            displayValue: cell.displayValue,
+            formulaValue: cell.formulaValue
         });
     }
 
@@ -222,6 +246,7 @@ function readLists() {
     var stopValue;
     var maxItems;
     var type;
+    var readMode;
     var index;
     var row;
     var col;
@@ -253,13 +278,14 @@ function readLists() {
         stopValue = normalizeKey(list.stopValue || "");
         maxItems = Math.max(1, toInt(list.maxItems, fallbackMaxRows));
         type = normalizeType(list.type);
+        readMode = normalizeReadMode(list.readMode);
         values = [];
         preview = [];
 
         for (index = 0; index < maxItems; index += 1) {
             row = startCell.row + (direction === "down" ? index : 0);
             col = startCell.col + (direction === "right" ? index : 0);
-            cell = readCell(sheet, numberToCol(col) + String(row), type);
+            cell = readCell(sheet, numberToCol(col) + String(row), type, readMode);
             display = safeString(cell.displayValue).trim();
 
             if (stopMode === "stop_value") {
@@ -286,6 +312,7 @@ function readLists() {
             startAddress: safeString(list.startAddress || list.address || "A1"),
             direction: direction,
             type: type,
+            readMode: readMode,
             items: values,
             itemsCount: values.length,
             previewItems: preview
@@ -330,6 +357,7 @@ function readTables(existingErrors) {
     var rows;
     var preview;
     var label;
+    var readMode;
 
     for (i = 0; i < items.length; i += 1) {
         table = items[i] || {};
@@ -342,6 +370,7 @@ function readTables(existingErrors) {
 
         headerRow = Math.max(1, toInt(table.headerRow, 1));
         startRow = headerRow + Math.max(0, toInt(table.startRowOffset, 1));
+        readMode = normalizeReadMode(table.readMode);
         keyHeader = normalizeKey(table.keyHeader || "");
         headerMap = buildHeaderMap(sheet, headerRow, Math.max(64, getItems(table.columns).length * 8, colToNumber("CZ")));
         keyColumn = headerMap[keyHeader];
@@ -377,7 +406,7 @@ function readTables(existingErrors) {
 
         for (rowIndex = 0; rowIndex < maxRows; rowIndex += 1) {
             currentRow = startRow + rowIndex;
-            keyCell = readCell(sheet, numberToCol(keyColumn) + String(currentRow), "text");
+            keyCell = readCell(sheet, numberToCol(keyColumn) + String(currentRow), "text", readMode);
             if (!isFilled(keyCell.value, "text")) {
                 emptyStreak += 1;
                 if (emptyStreak > emptyRowTolerance)
@@ -391,7 +420,7 @@ function readTables(existingErrors) {
 
             for (c = 0; c < resolvedColumns.length; c += 1) {
                 itemInfo = resolvedColumns[c];
-                cell = itemInfo.colIndex ? readCell(sheet, numberToCol(itemInfo.colIndex) + String(currentRow), itemInfo.type) : { value: "", displayValue: "" };
+                cell = itemInfo.colIndex ? readCell(sheet, numberToCol(itemInfo.colIndex) + String(currentRow), itemInfo.type, readMode) : { value: "", displayValue: "", formulaValue: "" };
                 row[itemInfo.key] = cell.value;
                 previewRow[itemInfo.key] = cell.displayValue;
             }
@@ -409,6 +438,7 @@ function readTables(existingErrors) {
             label: label,
             sheet: safeString(table.sheet || "Sheet1"),
             keyHeader: safeString(table.keyHeader || ""),
+            readMode: readMode,
             rowsCount: rows.length,
             columns: resolvedColumns,
             rows: rows,
