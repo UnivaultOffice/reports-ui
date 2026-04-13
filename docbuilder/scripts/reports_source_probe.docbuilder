@@ -1,0 +1,458 @@
+var sourceFilePath = (typeof __REPORTS_sourceFilePath !== "undefined" && __REPORTS_sourceFilePath !== null) ? String(__REPORTS_sourceFilePath) : "";
+var sourceFileConfigJson = (typeof __REPORTS_sourceFileConfigJson !== "undefined" && __REPORTS_sourceFileConfigJson !== null) ? String(__REPORTS_sourceFileConfigJson) : "";
+var sourceSchemaJson = (typeof __REPORTS_sourceSchemaJson !== "undefined" && __REPORTS_sourceSchemaJson !== null) ? String(__REPORTS_sourceSchemaJson) : "";
+var resultPath = (typeof __REPORTS_resultPath !== "undefined" && __REPORTS_resultPath !== null) ? String(__REPORTS_resultPath) : "";
+var sourceFileConfig = {};
+var sourceSchema = {};
+var previewRows = 10;
+var strictMode = true;
+
+function safeString(value) {
+    return (value === undefined || value === null) ? "" : String(value);
+}
+
+function toInt(value, fallback) {
+    var n = parseInt(value, 10);
+    return isNaN(n) ? fallback : n;
+}
+
+function parseJsonSafe(text, fallback) {
+    var raw = safeString(text).trim();
+    if (!raw)
+        return fallback;
+    try {
+        return JSON.parse(raw);
+    } catch (e) {
+        return fallback;
+    }
+}
+
+function normalizeKey(value) {
+    return safeString(value).trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function normalizeType(value) {
+    var type = safeString(value || "text").trim().toLowerCase();
+    if (type !== "number" && type !== "date")
+        type = "text";
+    return type;
+}
+
+function colToNumber(value) {
+    var text = safeString(value).toUpperCase().replace(/[^A-Z]/g, "");
+    var out = 0;
+    var i = 0;
+    if (!text)
+        return 1;
+    for (i = 0; i < text.length; i += 1)
+        out = out * 26 + (text.charCodeAt(i) - 64);
+    return out;
+}
+
+function numberToCol(value) {
+    var num = Math.max(1, toInt(value, 1));
+    var out = "";
+    var mod = 0;
+    while (num > 0) {
+        mod = (num - 1) % 26;
+        out = String.fromCharCode(65 + mod) + out;
+        num = Math.floor((num - mod - 1) / 26);
+    }
+    return out;
+}
+
+function parseA1Cell(value) {
+    var match = safeString(value).replace(/\$/g, "").toUpperCase().match(/^([A-Z]+)(\d+)$/);
+    if (!match)
+        return null;
+    return {
+        col: colToNumber(match[1]),
+        row: toInt(match[2], 0)
+    };
+}
+
+function makeError(code, message) {
+    return {
+        code: safeString(code),
+        message: safeString(message)
+    };
+}
+
+function pushError(result, code, message) {
+    result.errors.push(makeError(code, message));
+}
+
+function isArrayLike(value) {
+    return !!(value && typeof value.length === "number");
+}
+
+function getItems(value) {
+    return isArrayLike(value) ? value : [];
+}
+
+function getSheet(name) {
+    var sheetName = safeString(name).trim();
+    if (!sheetName)
+        return null;
+    try {
+        return Api.GetSheet(sheetName);
+    } catch (e) {
+        return null;
+    }
+}
+
+function getRange(sheet, address) {
+    return sheet.GetRange(safeString(address).trim() || "A1");
+}
+
+function readCell(sheet, address, type) {
+    var range = getRange(sheet, address);
+    var raw = "";
+    var text = "";
+    var parsed = "";
+    var normalizedType = normalizeType(type);
+
+    try {
+        raw = range.GetValue();
+    } catch (eRaw) {
+        raw = "";
+    }
+    try {
+        text = range.GetText();
+    } catch (eText) {
+        text = safeString(raw);
+    }
+
+    if (normalizedType === "number") {
+        if (typeof raw === "number")
+            parsed = raw;
+        else {
+            parsed = Number(safeString(text || raw).replace(/\s+/g, "").replace(",", "."));
+            if (isNaN(parsed))
+                parsed = "";
+        }
+    } else if (normalizedType === "date") {
+        parsed = (typeof raw === "number") ? raw : safeString(text || raw).trim();
+    } else {
+        parsed = safeString(text || raw);
+    }
+
+    return {
+        value: parsed,
+        displayValue: safeString(text || raw).trim()
+    };
+}
+
+function isFilled(value, type) {
+    if (normalizeType(type) === "number")
+        return !(value === "" || value === null || value === undefined || isNaN(Number(value)));
+    return safeString(value).trim() !== "";
+}
+
+function buildHeaderMap(sheet, headerRow, scanColumns) {
+    var map = {};
+    var col = 0;
+    var key = "";
+    for (col = 1; col <= scanColumns; col += 1) {
+        key = normalizeKey(readCell(sheet, numberToCol(col) + String(headerRow), "text").displayValue);
+        if (key && !map[key])
+            map[key] = col;
+    }
+    return map;
+}
+
+function readFields() {
+    var items = getItems(sourceSchema.fields);
+    var out = [];
+    var errors = [];
+    var i = 0;
+    var field;
+    var sheet;
+    var type;
+    var label;
+    var key;
+    var address;
+    var cell;
+
+    for (i = 0; i < items.length; i += 1) {
+        field = items[i] || {};
+        key = safeString(field.key || ("field_" + String(i + 1)));
+        label = safeString(field.label || ("Field " + String(i + 1)));
+        sheet = getSheet(field.sheet || "Sheet1");
+        address = safeString(field.address || "A1");
+        type = normalizeType(field.type);
+
+        if (!sheet) {
+            errors.push(makeError("sheet_not_found", "Sheet not found: " + safeString(field.sheet || "Sheet1")));
+            continue;
+        }
+
+        cell = readCell(sheet, address, type);
+        if (!(field && field.required === false) && !isFilled(cell.value, type))
+            errors.push(makeError("required_field_empty", "Required field is empty: " + label));
+
+        out.push({
+            key: key,
+            label: label,
+            type: type,
+            sheet: safeString(field.sheet || "Sheet1"),
+            address: address,
+            value: cell.value,
+            displayValue: cell.displayValue
+        });
+    }
+
+    return {
+        items: out,
+        errors: errors
+    };
+}
+
+function readLists() {
+    var items = getItems(sourceSchema.lists);
+    var out = [];
+    var errors = [];
+    var fallbackMaxRows = Math.max(1, toInt(sourceFileConfig.maxRowsDefault, 200));
+    var i = 0;
+    var list;
+    var sheet;
+    var startCell;
+    var direction;
+    var stopMode;
+    var stopValue;
+    var maxItems;
+    var type;
+    var index;
+    var row;
+    var col;
+    var cell;
+    var display;
+    var values;
+    var preview;
+
+    for (i = 0; i < items.length; i += 1) {
+        list = items[i] || {};
+        sheet = getSheet(list.sheet || "Sheet1");
+        if (!sheet) {
+            errors.push(makeError("sheet_not_found", "Sheet not found: " + safeString(list.sheet || "Sheet1")));
+            continue;
+        }
+
+        startCell = parseA1Cell(list.startAddress || list.address || "A1");
+        if (!startCell) {
+            errors.push(makeError("list_start_invalid", "Invalid list start cell: " + safeString(list.startAddress || list.address || "A1")));
+            continue;
+        }
+
+        direction = safeString(list.direction || "down").trim().toLowerCase();
+        if (direction !== "right")
+            direction = "down";
+        stopMode = safeString(list.stopMode || "empty").trim().toLowerCase();
+        if (stopMode !== "stop_value")
+            stopMode = "empty";
+        stopValue = normalizeKey(list.stopValue || "");
+        maxItems = Math.max(1, toInt(list.maxItems, fallbackMaxRows));
+        type = normalizeType(list.type);
+        values = [];
+        preview = [];
+
+        for (index = 0; index < maxItems; index += 1) {
+            row = startCell.row + (direction === "down" ? index : 0);
+            col = startCell.col + (direction === "right" ? index : 0);
+            cell = readCell(sheet, numberToCol(col) + String(row), type);
+            display = safeString(cell.displayValue).trim();
+
+            if (stopMode === "stop_value") {
+                if (!display)
+                    break;
+                if (stopValue && normalizeKey(display) === stopValue)
+                    break;
+            } else if (!isFilled(cell.value, type)) {
+                break;
+            }
+
+            values.push(cell.value);
+            if (preview.length < previewRows)
+                preview.push(display || safeString(cell.value));
+        }
+
+        if (!(list && list.required === false) && !values.length)
+            errors.push(makeError("list_empty", "List has no data: " + safeString(list.label || list.key || ("List " + String(i + 1)))));
+
+        out.push({
+            key: safeString(list.key || ("list_" + String(i + 1))),
+            label: safeString(list.label || ("List " + String(i + 1))),
+            sheet: safeString(list.sheet || "Sheet1"),
+            startAddress: safeString(list.startAddress || list.address || "A1"),
+            direction: direction,
+            type: type,
+            items: values,
+            itemsCount: values.length,
+            previewItems: preview
+        });
+    }
+
+    return {
+        items: out,
+        errors: errors
+    };
+}
+
+function readTables(existingErrors) {
+    var items = getItems(sourceSchema.tables);
+    var out = [];
+    var errors = [];
+    var priorErrors = getItems(existingErrors);
+    var fallbackMaxRows = Math.max(1, toInt(sourceFileConfig.maxRowsDefault, 200));
+    var i = 0;
+    var table;
+    var sheet;
+    var headerRow;
+    var startRow;
+    var keyHeader;
+    var headerMap;
+    var keyColumn;
+    var columns;
+    var resolvedColumns;
+    var c;
+    var column;
+    var headerIndex;
+    var maxRows;
+    var emptyRowTolerance;
+    var rowIndex;
+    var currentRow;
+    var keyCell;
+    var emptyStreak;
+    var itemInfo;
+    var cell;
+    var row;
+    var previewRow;
+    var rows;
+    var preview;
+    var label;
+
+    for (i = 0; i < items.length; i += 1) {
+        table = items[i] || {};
+        label = safeString(table.label || table.key || ("Table " + String(i + 1)));
+        sheet = getSheet(table.sheet || "Sheet1");
+        if (!sheet) {
+            errors.push(makeError("sheet_not_found", "Sheet not found: " + safeString(table.sheet || "Sheet1")));
+            continue;
+        }
+
+        headerRow = Math.max(1, toInt(table.headerRow, 1));
+        startRow = headerRow + Math.max(0, toInt(table.startRowOffset, 1));
+        keyHeader = normalizeKey(table.keyHeader || "");
+        headerMap = buildHeaderMap(sheet, headerRow, Math.max(64, getItems(table.columns).length * 8, colToNumber("CZ")));
+        keyColumn = headerMap[keyHeader];
+        if (!keyColumn) {
+            errors.push(makeError("key_header_not_found", "Key column not found: " + safeString(table.keyHeader || "")));
+            continue;
+        }
+
+        columns = getItems(table.columns);
+        resolvedColumns = [];
+        for (c = 0; c < columns.length; c += 1) {
+            column = columns[c] || {};
+            headerIndex = headerMap[normalizeKey(column.header || column.label || ("Column " + String(c + 1)))];
+            if (!headerIndex && !(column && column.required === false))
+                errors.push(makeError("column_not_found", "Column not found: " + safeString(column.header || column.label || ("Column " + String(c + 1)))));
+            itemInfo = {
+                key: safeString(column.key || ("column_" + String(c + 1))),
+                label: safeString(column.label || ("Column " + String(c + 1))),
+                type: normalizeType(column.type),
+                colIndex: headerIndex || 0
+            };
+            resolvedColumns.push(itemInfo);
+        }
+
+        if ((priorErrors.length + errors.length) && strictMode)
+            continue;
+
+        rows = [];
+        preview = [];
+        maxRows = Math.max(1, toInt(table.maxRows, fallbackMaxRows));
+        emptyRowTolerance = Math.max(0, toInt(table.emptyRowTolerance, 1));
+        emptyStreak = 0;
+
+        for (rowIndex = 0; rowIndex < maxRows; rowIndex += 1) {
+            currentRow = startRow + rowIndex;
+            keyCell = readCell(sheet, numberToCol(keyColumn) + String(currentRow), "text");
+            if (!isFilled(keyCell.value, "text")) {
+                emptyStreak += 1;
+                if (emptyStreak > emptyRowTolerance)
+                    break;
+                continue;
+            }
+
+            emptyStreak = 0;
+            row = {};
+            previewRow = {};
+
+            for (c = 0; c < resolvedColumns.length; c += 1) {
+                itemInfo = resolvedColumns[c];
+                cell = itemInfo.colIndex ? readCell(sheet, numberToCol(itemInfo.colIndex) + String(currentRow), itemInfo.type) : { value: "", displayValue: "" };
+                row[itemInfo.key] = cell.value;
+                previewRow[itemInfo.key] = cell.displayValue;
+            }
+
+            rows.push(row);
+            if (preview.length < previewRows)
+                preview.push(previewRow);
+        }
+
+        if (!(table && table.required === false) && !rows.length)
+            errors.push(makeError("table_empty", "Table has no data: " + label));
+
+        out.push({
+            key: safeString(table.key || ("table_" + String(i + 1))),
+            label: label,
+            sheet: safeString(table.sheet || "Sheet1"),
+            keyHeader: safeString(table.keyHeader || ""),
+            rowsCount: rows.length,
+            columns: resolvedColumns,
+            rows: rows,
+            previewRows: preview
+        });
+    }
+
+    return {
+        items: out,
+        errors: errors
+    };
+}
+
+if (!sourceFilePath)
+    throw new Error("sourceFilePath is required");
+
+builder.OpenFile("__REPORTS_LITERAL_SOURCE_FILE_PATH__", "");
+sourceFileConfig = parseJsonSafe(sourceFileConfigJson, {});
+sourceSchema = parseJsonSafe(sourceSchemaJson, {});
+previewRows = Math.max(1, toInt(sourceFileConfig.previewRows, 10) || 10);
+strictMode = !(sourceFileConfig && sourceFileConfig.strictMode === false);
+GlobalVariable["reportsProbeFieldsResult"] = readFields();
+GlobalVariable["reportsProbeListsResult"] = readLists();
+GlobalVariable["reportsProbeTablesResult"] = readTables(
+    getItems(GlobalVariable["reportsProbeFieldsResult"] && GlobalVariable["reportsProbeFieldsResult"].errors).concat(
+        getItems(GlobalVariable["reportsProbeListsResult"] && GlobalVariable["reportsProbeListsResult"].errors)
+    )
+);
+GlobalVariable["reportsProbeJson"] = JSON.stringify({
+    ok: getItems(GlobalVariable["reportsProbeFieldsResult"] && GlobalVariable["reportsProbeFieldsResult"].errors).concat(
+        getItems(GlobalVariable["reportsProbeListsResult"] && GlobalVariable["reportsProbeListsResult"].errors),
+        getItems(GlobalVariable["reportsProbeTablesResult"] && GlobalVariable["reportsProbeTablesResult"].errors)
+    ).length === 0,
+    filePath: "__REPORTS_LITERAL_SOURCE_FILE_PATH__",
+    fields: getItems(GlobalVariable["reportsProbeFieldsResult"] && GlobalVariable["reportsProbeFieldsResult"].items),
+    lists: getItems(GlobalVariable["reportsProbeListsResult"] && GlobalVariable["reportsProbeListsResult"].items),
+    tables: getItems(GlobalVariable["reportsProbeTablesResult"] && GlobalVariable["reportsProbeTablesResult"].items),
+    warnings: [],
+    errors: getItems(GlobalVariable["reportsProbeFieldsResult"] && GlobalVariable["reportsProbeFieldsResult"].errors).concat(
+        getItems(GlobalVariable["reportsProbeListsResult"] && GlobalVariable["reportsProbeListsResult"].errors),
+        getItems(GlobalVariable["reportsProbeTablesResult"] && GlobalVariable["reportsProbeTablesResult"].errors)
+    )
+});
+builder.CloseFile();
+var probeResultJson = GlobalVariable["reportsProbeJson"];
+builder.WriteData("__REPORTS_LITERAL_RESULT_PATH__", "jsValue(probeResultJson)", false);
+var probeCompleted = true;

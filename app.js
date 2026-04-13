@@ -7,10 +7,16 @@ const SCENARIOS_LEGACY_FILE='data\\scenarios.json';
 const SCENARIOS_DIR='data\\scenarios';
 const SCENARIOS_INDEX_FILE='data\\scenarios\\index.json';
 const SCRIPT='docbuilder/scripts/reports_executor.docbuilder';
-const PROBE_TTL=60000;
+const SOURCE_PROBE_SCRIPT='docbuilder/scripts/reports_source_probe.docbuilder';
+const SOURCE_PROBE_PREFIX='__REPORTS_SOURCE_OK__';
+const PROBE_TTL=900000;
+const SOURCE_PROBE_CACHE_TTL=900000;
 const PENDING=Object.create(null);
 const WATCH=Object.create(null);
+const PATH_CHECK_PENDING=Object.create(null);
 const FILE_PENDING=Object.create(null);
+const SOURCE_PROBE_CACHE=Object.create(null);
+const DB_SCRIPT_CACHE=Object.create(null);
 const SCENARIO_TEMPLATE_EXT='xlsx';
 const GENERATED_DIR='generated';
 const THEME_IDS=['theme-light','theme-classic-light','theme-dark','theme-contrast-dark','theme-gray','theme-white','theme-night'];
@@ -147,6 +153,24 @@ const schema={
   ]},
   set_gridlines:{label:'Сетка листа',d:{sheet:'Лист1',show:true},f:[
     {k:'sheet',l:'Лист',t:'text',r:1},{k:'show',l:'Показывать линии сетки',t:'check',full:1}
+  ]},
+  insert_source_field:{label:'Вставить поле из файла',d:{source_field_id:'',targets:'Лист1:A1',keep_template_format:true},f:[
+    {k:'source_field_id',l:'Поле из файла',t:'select',dynamicOptions:'source_fields',r:1},
+    {k:'targets',l:'Точки вставки',t:'textarea',r:1,full:1,p:'Лист1:A1\\nЛист2:F10\\nСвод:C5,D5'},
+    {k:'keep_template_format',l:'Формат текста как в шаблоне',t:'check',full:1}
+  ]},
+  insert_source_list:{label:'Вставить список из файла',d:{source_list_id:'',targets:'Лист1:C13|A13:K13',insert_mode:'insert_rows',keep_template_format:true},f:[
+    {k:'source_list_id',l:'Список из файла',t:'select',dynamicOptions:'source_lists',r:1},
+    {k:'targets',l:'Точки вставки',t:'textarea',r:1,full:1,p:'Ф1:C13|A13:K13\\nСвод:D20|A20:H20'},
+    {k:'insert_mode',l:'Режим вставки',t:'select',o:[['insert_rows','Вставлять строки'],['overwrite','Записывать поверх']]},
+    {k:'keep_template_format',l:'Формат строк как в шаблоне',t:'check',full:1}
+  ]},
+  insert_source_table:{label:'Вставить таблицу из файла',d:{source_table_id:'',targets:'Лист1:A15|A15:N15',insert_mode:'insert_rows',keep_template_format:true,mappings:''},f:[
+    {k:'source_table_id',l:'Таблица из файла',t:'select',dynamicOptions:'source_tables',r:1,redraw:1},
+    {k:'targets',l:'Точки вставки',t:'textarea',r:1,full:1,p:'Лист1:A15|A15:N15\\nЛист2:A40|A40:N40'},
+    {k:'insert_mode',l:'Режим вставки',t:'select',o:[['insert_rows','Вставлять строки'],['overwrite','Записывать поверх']]},
+    {k:'keep_template_format',l:'Формат строк как в шаблоне',t:'check',full:1},
+    {k:'mappings',l:'Соответствие колонок',t:'textarea',r:1,full:1,p:'number=A\\ntitle=B\\nprice=C\\ndate=D'}
   ]}
 };
 
@@ -204,6 +228,10 @@ const els={
   btnAddInputFieldBottom:document.getElementById('btn-add-input-field-bottom'),
   btnToggleInputSection:document.getElementById('btn-toggle-input-section'),
   inputSectionBody:document.getElementById('input-section-body'),
+  sourceConfigRoot:document.getElementById('source-config-root'),
+  btnAddSourceField:document.getElementById('btn-add-source-field'),
+  btnAddSourceList:document.getElementById('btn-add-source-list'),
+  btnAddSourceTable:document.getElementById('btn-add-source-table'),
   btnPick:document.getElementById('btn-pick-template'),file:document.getElementById('template-file-input'),actionList:document.getElementById('action-list'),
   btnAddAction:document.getElementById('btn-add-action'),
   btnAddActionBottom:document.getElementById('btn-add-action-bottom'),
@@ -213,6 +241,15 @@ const els={
   runInputModal:document.getElementById('run-input-modal'),runInputTitle:document.getElementById('run-input-title'),
   runInputFields:document.getElementById('run-input-fields'),btnRunInputCancel:document.getElementById('btn-run-input-cancel'),
   btnRunInputSubmit:document.getElementById('btn-run-input-submit'),
+  runSourceSection:document.getElementById('run-source-section'),
+  runSourceSubtitle:document.getElementById('run-source-subtitle'),
+  btnRunSourcePick:document.getElementById('btn-run-source-pick'),
+  runSourceFileInput:document.getElementById('run-source-file-input'),
+  runSourceFilePath:document.getElementById('run-source-file-path'),
+  runSourceStatus:document.getElementById('run-source-status'),
+  runSourceStatusText:document.getElementById('run-source-status-text'),
+  runSourceError:document.getElementById('run-source-error'),
+  runSourcePreview:document.getElementById('run-source-preview'),
   listEditorModal:document.getElementById('list-editor-modal'),listEditorTitle:document.getElementById('list-editor-title'),
   listEditorSubtitle:document.getElementById('list-editor-subtitle'),listEditorText:document.getElementById('list-editor-text'),
   btnListEditorClose:document.getElementById('btn-list-editor-close'),btnListEditorCancel:document.getElementById('btn-list-editor-cancel'),
@@ -255,6 +292,13 @@ function resolveTemplate(raw){
   const root=getRoot();
   return root?joinPath(root,'reports-ui',rel):rel;
 }
+async function ensureReadableTemplatePath(raw){
+  const resolved=resolveTemplate(raw);
+  if(!resolved)throw new Error('Некорректный путь к шаблону.');
+  const ok=await canReadBinaryFile(resolved,2000);
+  if(!ok)throw new Error(`Файл шаблона не найден: ${resolved}`);
+  return resolved;
+}
 function isAbsPath(p){const s=normSlashes(p);return /^[a-zA-Z]:\\/.test(s)||/^\\\\/.test(s);}
 function getReportsUiDir(){const root=getRoot();return root?joinPath(root,'reports-ui'):'reports-ui';}
 function getTemplatesDir(){return joinPath(getReportsUiDir(),'templates');}
@@ -281,6 +325,101 @@ function getGeneratedDir(probe,tpl){
   if(fromProbe)return joinPath(fromProbe,GENERATED_DIR);
   const base=dirName(tpl||'');
   return base?joinPath(base,GENERATED_DIR):joinPath('reports-ui',GENERATED_DIR);
+}
+function resolveReportsPath(raw){
+  const p=toFsPath(raw);
+  if(!p)return '';
+  if(isAbsPath(p))return p;
+  return joinPath(getReportsUiDir(),p.replace(/^\.\\/,'').replace(/^reports-ui\\/i,''));
+}
+function stripBom(text){
+  return String(text||'').replace(/^\uFEFF/,'');
+}
+function toAsciiJsLiteral(value){
+  const json=JSON.stringify(value);
+  return String(json==null?'null':json)
+    .replace(/[\u2028\u2029]/g,ch=>`\\u${ch.charCodeAt(0).toString(16).padStart(4,'0')}`)
+    .replace(/[^\x20-\x7E]/g,ch=>`\\u${ch.charCodeAt(0).toString(16).padStart(4,'0')}`);
+}
+function toDocbuilderLiteralPath(path){
+  return normSlashes(path||'').replace(/\\/g,'/');
+}
+function applyDocbuilderLiterals(source,literals){
+  let out=String(source||'');
+  const map=isObj(literals)?literals:{};
+  Object.keys(map).forEach(key=>{
+    const token=`\"__REPORTS_LITERAL_${String(key)}__\"`;
+    out=out.split(token).join(JSON.stringify(toDocbuilderLiteralPath(String(map[key]||''))));
+  });
+  return out;
+}
+function pickDocbuilderWorkDir(probe){
+  const runtimeDir=probe&&probe.runtimeDir?toFsPath(probe.runtimeDir):'';
+  if(runtimeDir)return runtimeDir;
+  const runtimeExe=probe&&probe.runtimeExe?toFsPath(probe.runtimeExe):'';
+  return runtimeExe?dirName(runtimeExe):'';
+}
+async function loadDocbuilderScript(scriptPath){
+  const resolved=resolveReportsPath(scriptPath);
+  if(!resolved)throw new Error(`Не найден путь к скрипту DocumentBuilder: ${scriptPath}`);
+  if(Object.prototype.hasOwnProperty.call(DB_SCRIPT_CACHE,resolved))return DB_SCRIPT_CACHE[resolved];
+  const res=await readTextFile(resolved,5000);
+  if(!res||!res.ok)throw fileErr(res||{error:'script_read_failed',path:resolved});
+  const text=stripBom(res.content||'');
+  DB_SCRIPT_CACHE[resolved]=text;
+  return text;
+}
+async function materializeDocbuilderScript(scriptPath,variables,tag,literals){
+  const base=applyDocbuilderLiterals(await loadDocbuilderScript(scriptPath),literals);
+  return materializeDocbuilderSource(base,variables,tag);
+}
+async function materializeDocbuilderSource(baseSource,variables,tag,literals){
+  const base=applyDocbuilderLiterals(String(baseSource||''),literals);
+  const lines=[];
+  const vars=isObj(variables)?variables:{};
+  Object.keys(vars).forEach(key=>{
+    if(vars[key]===undefined)return;
+    lines.push(`var __REPORTS_${key} = ${toAsciiJsLiteral(vars[key])};`);
+  });
+  const wrapperDir=joinPath(getReportsUiDir(),GENERATED_DIR,'_runtime');
+  const wrapperPath=joinPath(wrapperDir,`reports_${String(tag||'run')}_${Date.now()}_${Math.random().toString(36).slice(2,8)}.docbuilder`);
+  await writeTextFile(wrapperPath,`${lines.join('\n')}\n${base}\n`,7000);
+  return wrapperPath;
+}
+function makeProbeResultPath(){
+  const resultDir=joinPath(getReportsUiDir(),GENERATED_DIR,'_runtime');
+  return joinPath(resultDir,`reports_probe_result_${Date.now()}_${Math.random().toString(36).slice(2,8)}.json`);
+}
+function makeTempOutputPath(){
+  const resultDir=joinPath(getReportsUiDir(),GENERATED_DIR,'_runtime');
+  return joinPath(resultDir,`reports_output_${Date.now()}_${Math.random().toString(36).slice(2,8)}.xlsx`);
+}
+async function readProbeResultFile(resultPath,timeoutMs){
+  const res=await readTextFile(resultPath,timeoutMs||5000);
+  if(!res||!res.ok)throw fileErr(res||{error:'probe_result_read_failed',path:resultPath});
+  const raw=stripBom(res.content||'').trim();
+  if(!raw)throw new Error('Probe result file is empty.');
+  const parsed=parse(raw);
+  if(!isObj(parsed))throw new Error('Probe result file has invalid JSON.');
+  return parsed;
+}
+async function waitProbeResultFile(resultPath,timeoutMs,pollMs){
+  const started=Date.now();
+  const limit=Math.max(1000,toInt(timeoutMs,15000)||15000);
+  const step=Math.max(100,toInt(pollMs,250)||250);
+  while(Date.now()-started<limit){
+    try{
+      return await readProbeResultFile(resultPath,600);
+    }catch(err){
+      const details=err&&err.details?err.details:null;
+      const code=details&&details.error?String(details.error):'';
+      const text=String(err&&err.message||'').toLowerCase();
+      const transient=code==='not_found'||code==='read_failed'||text.indexOf('empty')>=0||text.indexOf('invalid json')>=0;
+      if(!transient)throw err;
+    }
+    await new Promise(resolve=>setTimeout(resolve,step));
+  }
+  throw new Error(`Probe result timeout: ${resultPath}`);
 }
 function sanitizeTemplateName(name){
   let out=String(name||'').replace(/[<>:"/\\|?*\u0000-\u001F]+/g,' ').replace(/\s+/g,' ').trim();
@@ -323,6 +462,221 @@ function buildScenarioFileUsedMap(excludeScenarioId){
 }
 function makeScenarioFileNameForScenario(scenarioId,scenarioName){
   return ensureScenarioFileNameUniq(makeScenarioFileName(scenarioName),buildScenarioFileUsedMap(scenarioId));
+}
+function safeSourceKey(value,fallback){
+  let out=String(value||'').toLowerCase().replace(/\s+/g,'_').replace(/[^a-z0-9_]+/g,'_').replace(/^_+|_+$/g,'');
+  if(!out)out=String(fallback||'item');
+  return out;
+}
+function mkSourceFileConfig(){
+  return {
+    enabled:false,
+    label:'Файл с исходными данными',
+    required:true,
+    accept:['xlsx','xls'],
+    maxFileSizeMb:25,
+    maxRowsDefault:200,
+    probeTimeoutMs:45000,
+    previewRows:10,
+    strictMode:true
+  };
+}
+function normSourceFileConfig(raw){
+  const base=mkSourceFileConfig();
+  const src=isObj(raw)?raw:{};
+  const out=Object.assign({},base,src);
+  out.enabled=!!src.enabled;
+  out.label=String(src.label||base.label).trim()||base.label;
+  out.required=src.required===undefined?true:!!src.required;
+  out.maxFileSizeMb=Math.max(1,parseInt(src.maxFileSizeMb,10)||base.maxFileSizeMb);
+  out.maxRowsDefault=Math.max(1,parseInt(src.maxRowsDefault,10)||base.maxRowsDefault);
+  out.probeTimeoutMs=Math.max(5000,parseInt(src.probeTimeoutMs,10)||base.probeTimeoutMs);
+  out.previewRows=Math.max(1,parseInt(src.previewRows,10)||base.previewRows);
+  out.strictMode=src.strictMode===undefined?true:!!src.strictMode;
+  out.accept=Array.isArray(src.accept)?src.accept.map(x=>String(x||'').trim().toLowerCase()).filter(Boolean):base.accept.slice();
+  if(!out.accept.length)out.accept=base.accept.slice();
+  return out;
+}
+function mkSourceField(){
+  return {
+    id:uid('source-field'),
+    key:'field',
+    label:'Новое поле',
+    sheet:'Лист1',
+    address:'A1',
+    type:'text',
+    required:true
+  };
+}
+function normSourceField(raw,index){
+  const base=mkSourceField();
+  const src=isObj(raw)?raw:{};
+  const out=Object.assign({},base,src);
+  out.id=String(src.id||base.id);
+  out.label=String(src.label||base.label).trim()||`Поле ${index+1}`;
+  out.key=safeSourceKey(src.key||out.label,`field_${index+1}`);
+  out.sheet=String(src.sheet||base.sheet).trim()||base.sheet;
+  out.address=String(src.address||base.address).trim()||base.address;
+  out.type=String(src.type||base.type).trim().toLowerCase();
+  if(['text','number','date'].indexOf(out.type)<0)out.type='text';
+  out.required=src.required===undefined?true:!!src.required;
+  return out;
+}
+function mkSourceList(){
+  return {
+    id:uid('source-list'),
+    key:'list',
+    label:'Новый список',
+    sheet:'Лист1',
+    startAddress:'A1',
+    direction:'down',
+    stopMode:'empty',
+    stopValue:'СТОП',
+    maxItems:'200',
+    type:'text',
+    required:true
+  };
+}
+function normSourceList(raw,index){
+  const base=mkSourceList();
+  const src=isObj(raw)?raw:{};
+  const out=Object.assign({},base,src);
+  out.id=String(src.id||base.id);
+  out.label=String(src.label||base.label).trim()||`Список ${index+1}`;
+  out.key=safeSourceKey(src.key||out.label,`list_${index+1}`);
+  out.sheet=String(src.sheet||base.sheet).trim()||base.sheet;
+  out.startAddress=String(src.startAddress||src.address||base.startAddress).trim()||base.startAddress;
+  out.direction=String(src.direction||base.direction).trim().toLowerCase()==='right'?'right':'down';
+  out.stopMode=String(src.stopMode||base.stopMode).trim().toLowerCase()==='stop_value'?'stop_value':'empty';
+  out.stopValue=String(src.stopValue==null?base.stopValue:src.stopValue);
+  out.maxItems=String(src.maxItems||base.maxItems).trim()||base.maxItems;
+  out.type=String(src.type||base.type).trim().toLowerCase();
+  if(['text','number','date'].indexOf(out.type)<0)out.type='text';
+  out.required=src.required===undefined?true:!!src.required;
+  return out;
+}
+function mkSourceColumn(){
+  return {
+    id:uid('source-column'),
+    key:'column',
+    label:'Новая колонка',
+    header:'Колонка',
+    type:'text',
+    required:true
+  };
+}
+function normSourceColumn(raw,index){
+  const base=mkSourceColumn();
+  const src=isObj(raw)?raw:{};
+  const out=Object.assign({},base,src);
+  out.id=String(src.id||base.id);
+  out.label=String(src.label||base.label).trim()||`Колонка ${index+1}`;
+  out.key=safeSourceKey(src.key||out.label,`column_${index+1}`);
+  out.header=String(src.header||out.label).trim()||out.label;
+  out.type=String(src.type||base.type).trim().toLowerCase();
+  if(['text','number','date'].indexOf(out.type)<0)out.type='text';
+  out.required=src.required===undefined?true:!!src.required;
+  return out;
+}
+function mkSourceTable(){
+  return {
+    id:uid('source-table'),
+    key:'table',
+    label:'Новая таблица',
+    sheet:'Лист1',
+    headerRow:'1',
+    startRowOffset:'1',
+    keyHeader:'',
+    emptyRowTolerance:'1',
+    maxRows:'200',
+    columns:[mkSourceColumn()]
+  };
+}
+function normSourceTable(raw,index){
+  const base=mkSourceTable();
+  const src=isObj(raw)?raw:{};
+  const out=Object.assign({},base,src);
+  out.id=String(src.id||base.id);
+  out.label=String(src.label||base.label).trim()||`Таблица ${index+1}`;
+  out.key=safeSourceKey(src.key||out.label,`table_${index+1}`);
+  out.sheet=String(src.sheet||base.sheet).trim()||base.sheet;
+  out.headerRow=String(src.headerRow||base.headerRow).trim()||base.headerRow;
+  out.startRowOffset=String(src.startRowOffset||base.startRowOffset).trim()||base.startRowOffset;
+  out.keyHeader=String(src.keyHeader||'').trim();
+  out.emptyRowTolerance=String(src.emptyRowTolerance||base.emptyRowTolerance).trim()||base.emptyRowTolerance;
+  out.maxRows=String(src.maxRows||base.maxRows).trim()||base.maxRows;
+  out.columns=(Array.isArray(src.columns)?src.columns:[mkSourceColumn()]).map((item,colIndex)=>normSourceColumn(item,colIndex));
+  if(!out.columns.length)out.columns=[mkSourceColumn()];
+  return out;
+}
+function mkSourceSchema(){
+  return {
+    fields:[],
+    lists:[],
+    tables:[]
+  };
+}
+function normSourceSchema(raw){
+  const src=isObj(raw)?raw:{};
+  return {
+    fields:(Array.isArray(src.fields)?src.fields:[]).map((item,index)=>normSourceField(item,index)),
+    lists:(Array.isArray(src.lists)?src.lists:[]).map((item,index)=>normSourceList(item,index)),
+    tables:(Array.isArray(src.tables)?src.tables:[]).map((item,index)=>normSourceTable(item,index))
+  };
+}
+function sourceConfigEnabled(scenario){
+  return !!(scenario&&isObj(scenario.sourceFileConfig)&&scenario.sourceFileConfig.enabled);
+}
+function getScenarioSourceConfig(scenario){
+  return normSourceFileConfig(scenario&&scenario.sourceFileConfig);
+}
+function getScenarioSourceSchema(scenario){
+  return normSourceSchema(scenario&&scenario.sourceSchema);
+}
+function scenarioUsesSourceActions(scenario){
+  const actions=Array.isArray(scenario&&scenario.actions)?scenario.actions:[];
+  for(let i=0;i<actions.length;i+=1){
+    const type=String(actions[i]&&actions[i].type||'').trim();
+    if(type==='insert_source_field'||type==='insert_source_list'||type==='insert_source_table')return true;
+  }
+  return false;
+}
+function getDraftSourceFieldOptions(){
+  const schemaState=getScenarioSourceSchema(state.draft);
+  const out=schemaState.fields.map(field=>[field.key,field.label]);
+  return out.length?out:[['','Сначала добавьте поле файла']];
+}
+function getDraftSourceListOptions(){
+  const schemaState=getScenarioSourceSchema(state.draft);
+  const out=schemaState.lists.map(list=>[list.key,list.label]);
+  return out.length?out:[['','Сначала добавьте список файла']];
+}
+function getDraftSourceTableOptions(){
+  const schemaState=getScenarioSourceSchema(state.draft);
+  const out=schemaState.tables.map(table=>[table.key,table.label]);
+  return out.length?out:[['','Сначала добавьте таблицу файла']];
+}
+function getDynamicActionOptions(kind){
+  if(kind==='source_fields')return getDraftSourceFieldOptions();
+  if(kind==='source_lists')return getDraftSourceListOptions();
+  if(kind==='source_tables')return getDraftSourceTableOptions();
+  return [['','(нет вариантов)']];
+}
+function parseActionSourceMappings(raw){
+  const text=String(raw||'').trim();
+  if(!text)return {items:[],error:'Укажите соответствие колонок в формате key=A.'};
+  const items=[];
+  text.split(/\r?\n+/).forEach(line=>{
+    const row=String(line||'').trim();
+    if(!row)return;
+    const parts=row.split('=');
+    if(parts.length<2)return;
+    const sourceKey=safeSourceKey(parts.shift(), '');
+    const targetColumn=String(parts.join('=')||'').trim().toUpperCase();
+    if(sourceKey&&/^[A-Z]+$/.test(targetColumn))items.push({sourceKey,targetColumn});
+  });
+  if(!items.length)return {items:[],error:'Не удалось разобрать соответствие колонок.'};
+  return {items,error:''};
 }
 function fmtStamp(){
   const d=new Date();
@@ -503,9 +857,12 @@ function isTrue(v){
   const s=String(v==null?'':v).trim().toLowerCase();
   return s==='1'||s==='true'||s==='yes';
 }
+function toInt(value,fallback){
+  const n=parseInt(value,10);
+  return Number.isNaN(n)?fallback:n;
+}
 function clampInt(value,min,max,fallback){
-  let n=parseInt(value,10);
-  if(Number.isNaN(n))n=fallback;
+  let n=toInt(value,fallback);
   if(n<min)n=min;
   if(n>max)n=max;
   return n;
@@ -1381,6 +1738,35 @@ function parseCellBindings(raw){
   return {items,error:''};
 }
 
+function parseTableTargets(raw){
+  const text=String(raw||'').trim();
+  if(!text)return {items:[],error:'Укажите точки вставки в формате "Лист:A15|A15:N15".'};
+  const chunks=text.split(/[;\n]+/);
+  const items=[];
+  for(let i=0;i<chunks.length;i+=1){
+    const block=String(chunks[i]||'').trim();
+    if(!block)continue;
+    let sep=block.indexOf(':');
+    if(sep<=0){
+      const bang=block.indexOf('!');
+      if(bang>0)sep=bang;
+    }
+    if(sep<=0)return {items:[],error:`Блок ${i+1}: используйте формат "Лист:A15|A15:N15".`};
+    const sheet=block.slice(0,sep).trim();
+    const payload=block.slice(sep+1).trim();
+    const pipe=payload.indexOf('|');
+    if(pipe<=0)return {items:[],error:`Блок ${i+1}: разделите первую ячейку и строку-шаблон через "|".`};
+    const anchorCell=payload.slice(0,pipe).trim();
+    const templateRowRange=payload.slice(pipe+1).trim();
+    if(!sheet)return {items:[],error:`Блок ${i+1}: не указан лист.`};
+    if(!anchorCell)return {items:[],error:`Блок ${i+1}: не указана первая ячейка.`};
+    if(!templateRowRange)return {items:[],error:`Блок ${i+1}: не указана строка-шаблон.`};
+    items.push({sheet,anchor_cell:anchorCell,template_row_range:templateRowRange});
+  }
+  if(!items.length)return {items:[],error:'Не удалось разобрать точки вставки таблицы.'};
+  return {items,error:''};
+}
+
 function inputFieldLabel(field,index){
   const name=String(field&&field.name||'').trim();
   return name||`Поле ${index+1}`;
@@ -1404,6 +1790,32 @@ function normAction(a){
   const t=schema[a.type]?a.type:'set_cell_value';
   const o={id:a.id||uid('action'),type:t};
   Object.assign(o,schema[t].d||{},a);
+  if(t==='insert_source_field'){
+    const hasTargets=!(a.targets==null||String(a.targets).trim()==='');
+    if(!hasTargets){
+      const sheet=String(a.sheet||'Лист1').trim()||'Лист1';
+      const range=String(a.range||'A1').trim()||'A1';
+      o.targets=`${sheet}:${range}`;
+    }
+  }
+  if(t==='insert_source_list'){
+    const hasTargets=!(a.targets==null||String(a.targets).trim()==='');
+    if(!hasTargets){
+      const sheet=String(a.sheet||'Лист1').trim()||'Лист1';
+      const anchorCell=String(a.anchor_cell||'A1').trim()||'A1';
+      const templateRowRange=String(a.template_row_range||'A1:D1').trim()||'A1:D1';
+      o.targets=`${sheet}:${anchorCell}|${templateRowRange}`;
+    }
+  }
+  if(t==='insert_source_table'){
+    const hasTargets=!(a.targets==null||String(a.targets).trim()==='');
+    if(!hasTargets){
+      const sheet=String(a.sheet||'Лист1').trim()||'Лист1';
+      const anchorCell=String(a.anchor_cell||'A1').trim()||'A1';
+      const templateRowRange=String(a.template_row_range||'A1:D1').trim()||'A1:D1';
+      o.targets=`${sheet}:${anchorCell}|${templateRowRange}`;
+    }
+  }
   if(t==='set_cell_value')normalizeInsertStyleSettings(o,a);
   else if(t==='set_number_format')normalizeNumberFormatSettings(o);
   if(t==='set_font_style'){
@@ -1416,6 +1828,8 @@ function normAction(a){
 function normScenario(s){
   if(!isObj(s))return null;
   const rawInputs=Array.isArray(s.inputFields)?s.inputFields:(Array.isArray(s.input_fields)?s.input_fields:[]);
+  const sourceFileConfig=normSourceFileConfig(s.sourceFileConfig||s.source_file_config);
+  const sourceSchema=normSourceSchema(s.sourceSchema||s.source_schema);
   return{
     id:s.id||uid('scenario'),
     name:String(s.name||'Без названия'),
@@ -1423,6 +1837,8 @@ function normScenario(s){
     templatePath:String(s.templatePath||s.path||''),
     actions:Array.isArray(s.actions)?s.actions.map(normAction):[],
     inputFields:rawInputs.map(normInputField),
+    sourceFileConfig,
+    sourceSchema,
     createdAt:s.createdAt||new Date().toISOString(),
     updatedAt:s.updatedAt||s.updated||new Date().toISOString(),
     lastRunAt:s.lastRunAt||s.last_run||null
@@ -1508,8 +1924,26 @@ async function readTextFile(path,timeoutMs){
   const r=await requestNativeFile('reports:fileRead',{path},timeoutMs||3000);
   return isObj(r)?r:{ok:false,error:'invalid_read_response'};
 }
+async function readBinaryFileBase64(path,timeoutMs){
+  const r=await requestNativeFile('reports:fileRead',{path,encoding:'base64'},timeoutMs||12000);
+  if(!isObj(r)||!r.ok)throw fileErr(r||{error:'invalid_read_response',path});
+  return String(r.content||'');
+}
+async function canReadBinaryFile(path,timeoutMs){
+  try{
+    await readBinaryFileBase64(path,timeoutMs||2500);
+    return true;
+  }catch(_){
+    return false;
+  }
+}
 async function writeTextFile(path,content,timeoutMs){
   const r=await requestNativeFile('reports:fileWrite',{path,content:String(content||'')},timeoutMs||5000);
+  if(!isObj(r)||!r.ok)throw fileErr(r||{error:'write_failed'});
+  return r;
+}
+async function writeBinaryFileBase64(path,contentBase64,timeoutMs){
+  const r=await requestNativeFile('reports:fileWrite',{path,content:String(contentBase64||''),encoding:'base64'},timeoutMs||15000);
   if(!isObj(r)||!r.ok)throw fileErr(r||{error:'write_failed'});
   return r;
 }
@@ -1530,6 +1964,25 @@ async function deletePath(path,timeoutMs){
   if(!isObj(r))throw fileErr({error:'invalid_delete_response'});
   if(!r.ok&&String(r.error||'')!=='not_found')throw fileErr(r);
   return r;
+}
+async function relocateGeneratedFile(fromPath,toPath){
+  const from=String(fromPath||'').trim();
+  const to=String(toPath||'').trim();
+  if(!from||!to)throw fileErr({error:'invalid_path',fromPath:from,toPath:to});
+  if(samePath(from,to))return true;
+  try{
+    const moved=await movePath(from,to,2500);
+    if(moved&&moved.ok){
+      const exists=await ensureOutputExists(to,2500);
+      if(exists)return true;
+    }
+  }catch(_){ }
+  const base64=await readBinaryFileBase64(from,20000);
+  await writeBinaryFileBase64(to,base64,20000);
+  const exists=await ensureOutputExists(to,4000);
+  if(!exists)throw fileErr({error:'write_failed',path:to});
+  await deletePath(from,5000).catch(()=>{});
+  return true;
 }
 function warnFileOpsNeedRebuild(){
   toast('Файлы не удалось переименовать/удалить. Обновите DesktopEditors (reports:fileMove/reports:fileDelete).','error');
@@ -1696,7 +2149,7 @@ function resetItemCollapsedState(){
 
 function openModal(id){
   const src=state.scenarios.find(x=>x.id===id);
-  state.draft=src?clone(src):{id:uid('scenario'),name:'',description:'',templatePath:'',actions:[],inputFields:[],createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),lastRunAt:null};
+  state.draft=src?clone(src):{id:uid('scenario'),name:'',description:'',templatePath:'',actions:[],inputFields:[],sourceFileConfig:mkSourceFileConfig(),sourceSchema:mkSourceSchema(),createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),lastRunAt:null};
   resetItemCollapsedState();
   if(!Array.isArray(state.draft.actions))state.draft.actions=[];
   state.draft.actions=state.draft.actions.map(raw=>{
@@ -1706,6 +2159,8 @@ function openModal(id){
   });
   if(!Array.isArray(state.draft.inputFields))state.draft.inputFields=[];
   state.draft.inputFields=state.draft.inputFields.map(normInputField);
+  state.draft.sourceFileConfig=normSourceFileConfig(state.draft.sourceFileConfig);
+  state.draft.sourceSchema=normSourceSchema(state.draft.sourceSchema);
   if(src){
     // При редактировании существующего сценария: секции открыты, элементы свернуты.
     state.inputCollapsed=false;
@@ -1715,7 +2170,7 @@ function openModal(id){
   }
   els.title.textContent=src?'Изменение сценария':'Новый сценарий';
   els.name.value=state.draft.name; els.tpl.value=state.draft.templatePath; els.descr.value=state.draft.description;
-  renderInputFields(); renderActions(); syncSectionCollapseUi(); els.modal.classList.remove('hidden'); els.name.focus();
+  renderInputFields(); renderSourceConfig(); renderActions(); syncSectionCollapseUi(); els.modal.classList.remove('hidden'); els.name.focus();
 }
 function closeModal(){els.modal.classList.add('hidden');state.draft=null;resetItemCollapsedState();}
 
@@ -1822,7 +2277,11 @@ function renderActions(){
       const cap=document.createElement('span');cap.textContent=f.l;w.appendChild(cap);
       let inp;
       if(f.t==='textarea'){inp=document.createElement('textarea');inp.rows=2;inp.value=a[f.k]==null?'':String(a[f.k]);}
-      else if(f.t==='select'){inp=document.createElement('select');(f.o||[]).forEach(op=>{const o=document.createElement('option');o.value=op[0];o.textContent=op[1];o.selected=String(op[0])===String(a[f.k]);inp.appendChild(o);});}
+      else if(f.t==='select'){
+        inp=document.createElement('select');
+        const options=f.dynamicOptions?getDynamicActionOptions(f.dynamicOptions):(f.o||[]);
+        options.forEach(op=>{const o=document.createElement('option');o.value=op[0];o.textContent=op[1];o.selected=String(op[0])===String(a[f.k]);inp.appendChild(o);});
+      }
       else if(f.t==='color'){inp=createColorField(a,f);}
       else if(f.t==='font'){inp=createFontField(a,f);}
       else if(f.t==='font_size'){inp=createFontSizeField(a,f);}
@@ -2411,6 +2870,358 @@ function renderInputFields(){
     root.appendChild(item);
   });
 }
+function renderSourceConfig(){
+  const root=els.sourceConfigRoot;
+  if(!root)return;
+  root.innerHTML='';
+  if(!state.draft)return;
+  const config=state.draft.sourceFileConfig=normSourceFileConfig(state.draft.sourceFileConfig);
+  const schemaState=state.draft.sourceSchema=normSourceSchema(state.draft.sourceSchema);
+
+  const head=document.createElement('div');
+  head.className='source-config-head';
+  const toggle=document.createElement('label');
+  toggle.className='source-config-toggle';
+  const chk=document.createElement('input');
+  chk.type='checkbox';
+  chk.checked=!!config.enabled;
+  chk.onchange=(ev)=>{config.enabled=!!ev.target.checked;renderSourceConfig();renderActions();};
+  const txt=document.createElement('span');
+  txt.textContent='Использовать файл с исходными данными';
+  toggle.appendChild(chk);
+  toggle.appendChild(txt);
+  head.appendChild(toggle);
+  const meta=document.createElement('div');
+  meta.className='source-config-meta';
+  meta.textContent=`Полей: ${schemaState.fields.length}. Списков: ${schemaState.lists.length}. Таблиц: ${schemaState.tables.length}.`;
+  head.appendChild(meta);
+  root.appendChild(head);
+
+  if(!config.enabled)return;
+
+  const cfgGrid=document.createElement('div');
+  cfgGrid.className='form-grid';
+  const addConfigField=(label,value,apply,placeholder,type)=>{
+    const wrap=document.createElement('label');
+    wrap.className='field';
+    const cap=document.createElement('span');
+    cap.textContent=label;
+    const inp=document.createElement('input');
+    inp.type=type||'text';
+    inp.value=value;
+    if(placeholder)inp.placeholder=placeholder;
+    inp.oninput=(ev)=>apply(ev.target.value);
+    wrap.appendChild(cap);
+    wrap.appendChild(inp);
+    cfgGrid.appendChild(wrap);
+  };
+  addConfigField('Название блока',config.label,(v)=>{config.label=v;},'Файл с исходными данными');
+  addConfigField('Максимум строк по умолчанию',String(config.maxRowsDefault),(v)=>{config.maxRowsDefault=v;},'', 'number');
+  addConfigField('Лимит размера файла (MB)',String(config.maxFileSizeMb),(v)=>{config.maxFileSizeMb=v;},'', 'number');
+  addConfigField('Строк предпросмотра',String(config.previewRows),(v)=>{config.previewRows=v;},'', 'number');
+
+  const checks=document.createElement('div');
+  checks.className='field field-full';
+  const checksRow=document.createElement('div');
+  checksRow.className='field-inline';
+  [['required','Файл обязателен'],['strictMode','Строгая проверка структуры']].forEach(item=>{
+    const label=document.createElement('label');
+    label.className='field-inline';
+    const input=document.createElement('input');
+    input.type='checkbox';
+    input.checked=!!config[item[0]];
+    input.onchange=(ev)=>{config[item[0]]=!!ev.target.checked;};
+    const text=document.createElement('span');
+    text.textContent=item[1];
+    label.appendChild(input);
+    label.appendChild(text);
+    checksRow.appendChild(label);
+  });
+  checks.appendChild(checksRow);
+  cfgGrid.appendChild(checks);
+  root.appendChild(cfgGrid);
+
+  const fieldsWrap=document.createElement('div');
+  fieldsWrap.className='source-section-block';
+  const fieldsTitle=document.createElement('h4');
+  fieldsTitle.className='source-section-title';
+  fieldsTitle.textContent='Поля из файла';
+  fieldsWrap.appendChild(fieldsTitle);
+  if(!schemaState.fields.length){
+    const empty=document.createElement('div');
+    empty.className='source-empty';
+    empty.textContent='Поля файла не настроены.';
+    fieldsWrap.appendChild(empty);
+  }
+  schemaState.fields.forEach((field,index)=>{
+    const item=document.createElement('div');
+    item.className='source-item';
+    const headRow=document.createElement('div');
+    headRow.className='source-item-head';
+    const title=document.createElement('div');
+    title.className='source-item-title';
+    title.textContent=field.label;
+    const tools=document.createElement('div');
+    tools.className='source-item-tools';
+    const del=document.createElement('button');
+    del.type='button';
+    del.className='btn btn-danger';
+    del.textContent='Удалить';
+    del.onclick=()=>{schemaState.fields.splice(index,1);renderSourceConfig();renderActions();};
+    tools.appendChild(del);
+    headRow.appendChild(title);
+    headRow.appendChild(tools);
+    item.appendChild(headRow);
+
+    const grid=document.createElement('div');
+    grid.className='form-grid';
+    const addField=(label,value,apply,placeholder,type)=>{
+      const wrap=document.createElement('label');
+      wrap.className='field';
+      const cap=document.createElement('span');
+      cap.textContent=label;
+      let inp;
+      if(type==='select'){
+        inp=document.createElement('select');
+        [['text','Текст'],['number','Число'],['date','Дата']].forEach(opt=>{
+          const o=document.createElement('option');
+          o.value=opt[0];
+          o.textContent=opt[1];
+          if(opt[0]===value)o.selected=true;
+          inp.appendChild(o);
+        });
+        inp.onchange=(ev)=>apply(ev.target.value);
+      }else if(type==='check'){
+        inp=document.createElement('input');
+        inp.type='checkbox';
+        inp.checked=!!value;
+        inp.onchange=(ev)=>apply(!!ev.target.checked);
+      }else{
+        inp=document.createElement('input');
+        inp.type=type||'text';
+        inp.value=value;
+        if(placeholder)inp.placeholder=placeholder;
+        inp.oninput=(ev)=>apply(ev.target.value);
+      }
+      wrap.appendChild(cap);
+      wrap.appendChild(inp);
+      grid.appendChild(wrap);
+    };
+    addField('Название',field.label,(v)=>{field.label=v;title.textContent=String(v||'').trim()||`Поле ${index+1}`;});
+    addField('Ключ поля',field.key,(v)=>{field.key=safeSourceKey(v,`field_${index+1}`);});
+    addField('Лист',field.sheet,(v)=>{field.sheet=v;},'Лист1');
+    addField('Ячейка',field.address,(v)=>{field.address=v;},'B2');
+    addField('Тип значения',field.type,(v)=>{field.type=v;},'', 'select');
+    addField('Обязательное',field.required,(v)=>{field.required=!!v;},'', 'check');
+    item.appendChild(grid);
+    fieldsWrap.appendChild(item);
+  });
+  root.appendChild(fieldsWrap);
+
+  const listsWrap=document.createElement('div');
+  listsWrap.className='source-section-block';
+  const listsTitle=document.createElement('h4');
+  listsTitle.className='source-section-title';
+  listsTitle.textContent='Списки из файла';
+  listsWrap.appendChild(listsTitle);
+  if(!schemaState.lists.length){
+    const empty=document.createElement('div');
+    empty.className='source-empty';
+    empty.textContent='Списки файла не настроены.';
+    listsWrap.appendChild(empty);
+  }
+  schemaState.lists.forEach((list,index)=>{
+    const item=document.createElement('div');
+    item.className='source-item';
+    const headRow=document.createElement('div');
+    headRow.className='source-item-head';
+    const title=document.createElement('div');
+    title.className='source-item-title';
+    title.textContent=list.label;
+    const tools=document.createElement('div');
+    tools.className='source-item-tools';
+    const del=document.createElement('button');
+    del.type='button';
+    del.className='btn btn-danger';
+    del.textContent='Удалить';
+    del.onclick=()=>{schemaState.lists.splice(index,1);renderSourceConfig();renderActions();};
+    tools.appendChild(del);
+    headRow.appendChild(title);
+    headRow.appendChild(tools);
+    item.appendChild(headRow);
+
+    const grid=document.createElement('div');
+    grid.className='form-grid';
+    const addField=(label,value,apply,placeholder,type,options)=>{
+      const wrap=document.createElement('label');
+      wrap.className='field';
+      const cap=document.createElement('span');
+      cap.textContent=label;
+      let inp;
+      if(type==='select'){
+        inp=document.createElement('select');
+        (options||[]).forEach(opt=>{
+          const o=document.createElement('option');
+          o.value=opt[0];
+          o.textContent=opt[1];
+          if(opt[0]===value)o.selected=true;
+          inp.appendChild(o);
+        });
+        inp.onchange=(ev)=>apply(ev.target.value);
+      }else if(type==='check'){
+        inp=document.createElement('input');
+        inp.type='checkbox';
+        inp.checked=!!value;
+        inp.onchange=(ev)=>apply(!!ev.target.checked);
+      }else{
+        inp=document.createElement('input');
+        inp.type=type||'text';
+        inp.value=value;
+        if(placeholder)inp.placeholder=placeholder;
+        inp.oninput=(ev)=>apply(ev.target.value);
+      }
+      wrap.appendChild(cap);
+      wrap.appendChild(inp);
+      grid.appendChild(wrap);
+      return inp;
+    };
+    const stopModeOptions=[['empty','До пустой ячейки'],['stop_value','До стоп-значения']];
+    addField('Название списка',list.label,(v)=>{list.label=v;title.textContent=String(v||'').trim()||`Список ${index+1}`;});
+    addField('Ключ списка',list.key,(v)=>{list.key=safeSourceKey(v,`list_${index+1}`);});
+    addField('Лист',list.sheet,(v)=>{list.sheet=v;},'Лист1');
+    addField('Стартовая ячейка',list.startAddress,(v)=>{list.startAddress=v;},'A1');
+    addField('Направление чтения',list.direction,(v)=>{list.direction=v;},'', 'select', [['down','Вниз'],['right','Вправо']]);
+    addField('Граница чтения',list.stopMode,(v)=>{list.stopMode=v;renderSourceConfig();},'', 'select', stopModeOptions);
+    addField('Стоп-значение',list.stopValue,(v)=>{list.stopValue=v;},'СТОП');
+    addField('Максимум элементов',list.maxItems,(v)=>{list.maxItems=v;},String(config.maxRowsDefault),'number');
+    addField('Тип значения',list.type,(v)=>{list.type=v;},'', 'select', [['text','Текст'],['number','Число'],['date','Дата']]);
+    addField('Обязательное',list.required,(v)=>{list.required=!!v;},'', 'check');
+    item.appendChild(grid);
+    listsWrap.appendChild(item);
+  });
+  root.appendChild(listsWrap);
+
+  const tablesWrap=document.createElement('div');
+  tablesWrap.className='source-section-block';
+  const tablesTitle=document.createElement('h4');
+  tablesTitle.className='source-section-title';
+  tablesTitle.textContent='Таблицы из файла';
+  tablesWrap.appendChild(tablesTitle);
+  if(!schemaState.tables.length){
+    const empty=document.createElement('div');
+    empty.className='source-empty';
+    empty.textContent='Таблицы файла не настроены.';
+    tablesWrap.appendChild(empty);
+  }
+  schemaState.tables.forEach((table,index)=>{
+    const item=document.createElement('div');
+    item.className='source-item';
+    const headRow=document.createElement('div');
+    headRow.className='source-item-head';
+    const title=document.createElement('div');
+    title.className='source-item-title';
+    title.textContent=table.label;
+    const tools=document.createElement('div');
+    tools.className='source-item-tools';
+    const addColumn=document.createElement('button');
+    addColumn.type='button';
+    addColumn.className='btn btn-secondary';
+    addColumn.textContent='Колонка';
+    addColumn.onclick=()=>{table.columns.push(mkSourceColumn());renderSourceConfig();};
+    const del=document.createElement('button');
+    del.type='button';
+    del.className='btn btn-danger';
+    del.textContent='Удалить';
+    del.onclick=()=>{schemaState.tables.splice(index,1);renderSourceConfig();renderActions();};
+    tools.appendChild(addColumn);
+    tools.appendChild(del);
+    headRow.appendChild(title);
+    headRow.appendChild(tools);
+    item.appendChild(headRow);
+
+    const grid=document.createElement('div');
+    grid.className='form-grid';
+    const addField=(label,value,apply,placeholder,type)=>{
+      const wrap=document.createElement('label');
+      wrap.className='field';
+      const cap=document.createElement('span');
+      cap.textContent=label;
+      const inp=document.createElement('input');
+      inp.type=type||'text';
+      inp.value=value;
+      if(placeholder)inp.placeholder=placeholder;
+      inp.oninput=(ev)=>apply(ev.target.value);
+      wrap.appendChild(cap);
+      wrap.appendChild(inp);
+      grid.appendChild(wrap);
+    };
+    addField('Название таблицы',table.label,(v)=>{table.label=v;title.textContent=String(v||'').trim()||`Таблица ${index+1}`;});
+    addField('Ключ таблицы',table.key,(v)=>{table.key=safeSourceKey(v,`table_${index+1}`);});
+    addField('Лист',table.sheet,(v)=>{table.sheet=v;},'Лист1');
+    addField('Строка заголовков',table.headerRow,(v)=>{table.headerRow=v;},'6','number');
+    addField('Смещение до данных',table.startRowOffset,(v)=>{table.startRowOffset=v;},'1','number');
+    addField('Заголовок ключевой колонки',table.keyHeader,(v)=>{table.keyHeader=v;},'Номер');
+    addField('Пустых строк подряд',table.emptyRowTolerance,(v)=>{table.emptyRowTolerance=v;},'1','number');
+    addField('Максимум строк',table.maxRows,(v)=>{table.maxRows=v;},String(config.maxRowsDefault),'number');
+    item.appendChild(grid);
+
+    const columnsWrap=document.createElement('div');
+    columnsWrap.className='source-columns-list';
+    table.columns.forEach((column,colIndex)=>{
+      const row=document.createElement('div');
+      row.className='source-column-row';
+      const makeField=(label,value,apply,placeholder,type)=>{
+        const wrap=document.createElement('label');
+        wrap.className='field';
+        const cap=document.createElement('span');
+        cap.textContent=label;
+        let inp;
+        if(type==='select'){
+          inp=document.createElement('select');
+          [['text','Текст'],['number','Число'],['date','Дата']].forEach(opt=>{
+            const o=document.createElement('option');
+            o.value=opt[0];
+            o.textContent=opt[1];
+            if(opt[0]===value)o.selected=true;
+            inp.appendChild(o);
+          });
+          inp.onchange=(ev)=>apply(ev.target.value);
+        }else if(type==='check'){
+          inp=document.createElement('input');
+          inp.type='checkbox';
+          inp.checked=!!value;
+          inp.onchange=(ev)=>apply(!!ev.target.checked);
+        }else{
+          inp=document.createElement('input');
+          inp.type=type||'text';
+          inp.value=value;
+          if(placeholder)inp.placeholder=placeholder;
+          inp.oninput=(ev)=>apply(ev.target.value);
+        }
+        wrap.appendChild(cap);
+        wrap.appendChild(inp);
+        row.appendChild(wrap);
+      };
+      makeField('Название',column.label,(v)=>{column.label=v;},'Номер');
+      makeField('Ключ',column.key,(v)=>{column.key=safeSourceKey(v,`column_${colIndex+1}`);});
+      makeField('Заголовок в файле',column.header,(v)=>{column.header=v;},'Номер');
+      makeField('Тип',column.type,(v)=>{column.type=v;},'', 'select');
+      const actionWrap=document.createElement('div');
+      actionWrap.className='source-inline-actions';
+      const delCol=document.createElement('button');
+      delCol.type='button';
+      delCol.className='btn btn-danger';
+      delCol.textContent='-';
+      delCol.onclick=()=>{table.columns.splice(colIndex,1);if(!table.columns.length)table.columns.push(mkSourceColumn());renderSourceConfig();};
+      actionWrap.appendChild(delCol);
+      row.appendChild(actionWrap);
+      columnsWrap.appendChild(row);
+    });
+    item.appendChild(columnsWrap);
+    tablesWrap.appendChild(item);
+  });
+  root.appendChild(tablesWrap);
+}
 function readDraft(){if(!state.draft)return;state.draft.name=String(els.name.value||'').trim();state.draft.templatePath=String(els.tpl.value||'').trim();state.draft.description=String(els.descr.value||'').trim();}
 function validateDraft(){
   if(!state.draft)return 'Сценарий не открыт.'; readDraft();
@@ -2419,10 +3230,15 @@ function validateDraft(){
   if(/fakepath/i.test(state.draft.templatePath))return 'Получен fakepath. Укажите полный путь к шаблону.';
   if(!Array.isArray(state.draft.actions))state.draft.actions=[];
   if(!Array.isArray(state.draft.inputFields))state.draft.inputFields=[];
-  if(!state.draft.actions.length&&!state.draft.inputFields.length)return 'Добавьте хотя бы одно действие или поле ввода.';
+  state.draft.sourceFileConfig=normSourceFileConfig(state.draft.sourceFileConfig);
+  state.draft.sourceSchema=normSourceSchema(state.draft.sourceSchema);
+  if(!state.draft.actions.length&&!state.draft.inputFields.length&&!sourceConfigEnabled(state.draft))return 'Добавьте хотя бы одно действие, поле ввода или настройте источник файла.';
   const normalizedInputs=state.draft.inputFields.map(normInputField);
   state.draft.inputFields=normalizedInputs;
   const inputFieldIds=normalizedInputs.map(field=>field.id);
+  const sourceFieldKeys=state.draft.sourceSchema.fields.map(field=>field.key);
+  const sourceListKeys=state.draft.sourceSchema.lists.map(list=>list.key);
+  const sourceTableKeys=state.draft.sourceSchema.tables.map(table=>table.key);
   const cyclicFieldId=findInputDependencyCycle(normalizedInputs);
   if(cyclicFieldId){
     const cyclicIndex=normalizedInputs.findIndex(field=>field.id===cyclicFieldId);
@@ -2436,6 +3252,58 @@ function validateDraft(){
       if(inputFieldIds.indexOf(a.cond_field)<0)return `Шаг ${i+1} (${schema[a.type].label}): поле условия не найдено.`;
       if(conditionNeedsValue(a.cond_operator)&&String(a.cond_value==null?'':a.cond_value).trim()==='')
         return `Шаг ${i+1} (${schema[a.type].label}): укажите значение для условия.`;
+    }
+    if(a.type==='insert_source_field'){
+      if(!sourceConfigEnabled(state.draft))return `Шаг ${i+1} (${schema[a.type].label}): включите источник данных из файла.`;
+      if(sourceFieldKeys.indexOf(String(a.source_field_id||'').trim())<0)return `Шаг ${i+1} (${schema[a.type].label}): поле файла не найдено.`;
+      const parsedTargets=parseCellBindings(a.targets);
+      if(parsedTargets.error)return `Шаг ${i+1} (${schema[a.type].label}): ${parsedTargets.error}`;
+    }
+    if(a.type==='insert_source_list'){
+      if(!sourceConfigEnabled(state.draft))return `Шаг ${i+1} (${schema[a.type].label}): включите источник данных из файла.`;
+      if(sourceListKeys.indexOf(String(a.source_list_id||'').trim())<0)return `Шаг ${i+1} (${schema[a.type].label}): список файла не найден.`;
+      const parsedTargets=parseTableTargets(a.targets);
+      if(parsedTargets.error)return `Шаг ${i+1} (${schema[a.type].label}): ${parsedTargets.error}`;
+      for(let t=0;t<parsedTargets.items.length;t+=1){
+        const target=parsedTargets.items[t];
+        const anchorRange=parseA1Range(target.anchor_cell);
+        if(!anchorRange||anchorRange.c1!==anchorRange.c2||anchorRange.r1!==anchorRange.r2){
+          return `Шаг ${i+1} (${schema[a.type].label}): неверная первая ячейка в точке вставки ${t+1}.`;
+        }
+        const templateRange=parseA1Range(target.template_row_range);
+        if(!templateRange)return `Шаг ${i+1} (${schema[a.type].label}): неверная строка-шаблон в точке вставки ${t+1}.`;
+        if(templateRange.r1!==templateRange.r2)return `Шаг ${i+1} (${schema[a.type].label}): строка-шаблон в точке вставки ${t+1} должна быть одной строкой.`;
+      }
+    }
+    if(a.type==='insert_source_table'){
+      if(!sourceConfigEnabled(state.draft))return `Шаг ${i+1} (${schema[a.type].label}): включите источник данных из файла.`;
+      if(sourceTableKeys.indexOf(String(a.source_table_id||'').trim())<0)return `Шаг ${i+1} (${schema[a.type].label}): таблица файла не найдена.`;
+      const parsedTargets=parseTableTargets(a.targets);
+      if(parsedTargets.error)return `Шаг ${i+1} (${schema[a.type].label}): ${parsedTargets.error}`;
+      for(let t=0;t<parsedTargets.items.length;t+=1){
+        const target=parsedTargets.items[t];
+        const anchorRange=parseA1Range(target.anchor_cell);
+        if(!anchorRange||anchorRange.c1!==anchorRange.c2||anchorRange.r1!==anchorRange.r2){
+          return `Шаг ${i+1} (${schema[a.type].label}): неверная первая ячейка в точке вставки ${t+1}.`;
+        }
+        const templateRange=parseA1Range(target.template_row_range);
+        if(!templateRange)return `Шаг ${i+1} (${schema[a.type].label}): неверная строка-шаблон в точке вставки ${t+1}.`;
+        if(templateRange.r1!==templateRange.r2)return `Шаг ${i+1} (${schema[a.type].label}): строка-шаблон в точке вставки ${t+1} должна быть одной строкой.`;
+      }
+      const parsedMappings=parseActionSourceMappings(a.mappings);
+      if(parsedMappings.error)return `Шаг ${i+1} (${schema[a.type].label}): ${parsedMappings.error}`;
+      const table=state.draft.sourceSchema.tables.find(item=>item.key===String(a.source_table_id||'').trim());
+      if(table){
+        const sourceKeys=table.columns.map(column=>column.key);
+        const usedTargets=Object.create(null);
+        for(let m=0;m<parsedMappings.items.length;m+=1){
+          const mapping=parsedMappings.items[m];
+          if(sourceKeys.indexOf(mapping.sourceKey)<0)return `Шаг ${i+1} (${schema[a.type].label}): колонка источника «${mapping.sourceKey}» не найдена.`;
+          const targetKey=String(mapping.targetColumn||'').toUpperCase();
+          if(usedTargets[targetKey])return `Шаг ${i+1} (${schema[a.type].label}): колонка назначения «${targetKey}» указана несколько раз.`;
+          usedTargets[targetKey]=true;
+        }
+      }
     }
   }
   for(let i=0;i<normalizedInputs.length;i+=1){
@@ -2479,6 +3347,55 @@ function validateDraft(){
       if(field.scope==='sheets'&&!parseSheetList(field.sheets).length)
         return `${label}: укажите хотя бы один лист для поиска ключа.`;
       if(field.multiple)return `${label}: множественный ввод сейчас доступен только для вставки в ячейки/диапазоны.`;
+    }
+  }
+  if(sourceConfigEnabled(state.draft)){
+    const schemaState=state.draft.sourceSchema;
+    if(!schemaState.fields.length&&!schemaState.lists.length&&!schemaState.tables.length)return 'Добавьте хотя бы одно поле, список или таблицу в источнике файла.';
+    const usedFieldKeys=Object.create(null);
+    for(let i=0;i<schemaState.fields.length;i+=1){
+      const field=normSourceField(schemaState.fields[i],i);
+      schemaState.fields[i]=field;
+      if(!field.label)return `Источник файла: поле ${i+1} без названия.`;
+      if(!field.sheet)return `Источник файла: укажите лист для поля «${field.label}».`;
+      if(!field.address)return `Источник файла: укажите ячейку для поля «${field.label}».`;
+      if(usedFieldKeys[field.key])return `Источник файла: ключ поля «${field.key}» повторяется.`;
+      usedFieldKeys[field.key]=true;
+    }
+    const usedListKeys=Object.create(null);
+    for(let i=0;i<schemaState.lists.length;i+=1){
+      const list=normSourceList(schemaState.lists[i],i);
+      schemaState.lists[i]=list;
+      if(!list.label)return `Источник файла: список ${i+1} без названия.`;
+      if(!list.sheet)return `Источник файла: укажите лист для списка «${list.label}».`;
+      if(!list.startAddress)return `Источник файла: укажите стартовую ячейку для списка «${list.label}».`;
+      if(!(parseInt(list.maxItems,10)>0))return `Источник файла: неверный лимит элементов для списка «${list.label}».`;
+      if(list.stopMode==='stop_value'&&String(list.stopValue||'').trim()==='')return `Источник файла: укажите стоп-значение для списка «${list.label}».`;
+      if(usedListKeys[list.key])return `Источник файла: ключ списка «${list.key}» повторяется.`;
+      usedListKeys[list.key]=true;
+    }
+    const usedTableKeys=Object.create(null);
+    for(let i=0;i<schemaState.tables.length;i+=1){
+      const table=normSourceTable(schemaState.tables[i],i);
+      schemaState.tables[i]=table;
+      if(!table.label)return `Источник файла: таблица ${i+1} без названия.`;
+      if(!table.sheet)return `Источник файла: укажите лист для таблицы «${table.label}».`;
+      if(!(parseInt(table.headerRow,10)>0))return `Источник файла: неверная строка заголовков для таблицы «${table.label}».`;
+      if(!(parseInt(table.startRowOffset,10)>=0))return `Источник файла: неверное смещение данных для таблицы «${table.label}».`;
+      if(!table.keyHeader)return `Источник файла: укажите ключевую колонку для таблицы «${table.label}».`;
+      if(!(parseInt(table.emptyRowTolerance,10)>=0))return `Источник файла: неверный допуск пустых строк для таблицы «${table.label}».`;
+      if(!(parseInt(table.maxRows,10)>0))return `Источник файла: неверный лимит строк для таблицы «${table.label}».`;
+      if(usedTableKeys[table.key])return `Источник файла: ключ таблицы «${table.key}» повторяется.`;
+      usedTableKeys[table.key]=true;
+      const usedColumnKeys=Object.create(null);
+      for(let c=0;c<table.columns.length;c+=1){
+        const column=normSourceColumn(table.columns[c],c);
+        table.columns[c]=column;
+        if(!column.label)return `Источник файла: колонка ${c+1} в таблице «${table.label}» без названия.`;
+        if(!column.header)return `Источник файла: колонка «${column.label}» в таблице «${table.label}» без заголовка.`;
+        if(usedColumnKeys[column.key])return `Источник файла: ключ колонки «${column.key}» повторяется в таблице «${table.label}».`;
+        usedColumnKeys[column.key]=true;
+      }
     }
   }
   return '';
@@ -2534,7 +3451,7 @@ async function saveDraft(){
     if(state.draft!==draftRef||!state.draft)return;
     state.draft.templatePath=preparedPath;
     els.tpl.value=preparedPath;
-    const s={id:state.draft.id,name:state.draft.name,description:state.draft.description,templatePath:state.draft.templatePath,actions:state.draft.actions.map(normAction),inputFields:(state.draft.inputFields||[]).map(normInputField),createdAt:state.draft.createdAt||new Date().toISOString(),updatedAt:new Date().toISOString(),lastRunAt:state.draft.lastRunAt||null};
+    const s={id:state.draft.id,name:state.draft.name,description:state.draft.description,templatePath:state.draft.templatePath,actions:state.draft.actions.map(normAction),inputFields:(state.draft.inputFields||[]).map(normInputField),sourceFileConfig:normSourceFileConfig(state.draft.sourceFileConfig),sourceSchema:normSourceSchema(state.draft.sourceSchema),createdAt:state.draft.createdAt||new Date().toISOString(),updatedAt:new Date().toISOString(),lastRunAt:state.draft.lastRunAt||null};
     let staleScenarioPath='';
     let staleTemplatePath='';
     if(existingIdx>=0){
@@ -2608,6 +3525,7 @@ function boolVal(v){
   return !!v;
 }
 function clearWatch(id){const w=WATCH[id];if(!w)return; if(w.t)clearInterval(w.t); delete WATCH[id];}
+function clearPathCheck(id){const p=PATH_CHECK_PENDING[id];if(!p)return null;if(p.t)clearTimeout(p.t);if(p.i)clearInterval(p.i);delete PATH_CHECK_PENDING[id];return p;}
 function clearPending(id){const p=PENDING[id];if(!p)return null;if(p.t)clearTimeout(p.t);delete PENDING[id];clearWatch(id);return p;}
 function addPending(id,res,rej,ms){PENDING[id]={res,rej,t:setTimeout(()=>{const p=clearPending(id);if(!p)return;const e=new Error('Таймаут DocumentBuilder');e.details={requestId:id,error:'timeout'};p.rej(e);},ms)}}
 function dbErr(r){const e=new Error((r&&r.error)||'Ошибка DocumentBuilder');e.details=r||{};return e;}
@@ -2620,6 +3538,13 @@ function handleFilesChecked(param){
     if(w.openAfterRun){clearWatch(id);return;}
     clearWatch(id);
     onDbResult({ok:true,requestId:id,exitCode:0,via:'files:checked'});
+  });
+  Object.keys(PATH_CHECK_PENDING).forEach(id=>{
+    const pending=PATH_CHECK_PENDING[id];if(!pending)return;
+    if(!Object.prototype.hasOwnProperty.call(data,pending.k))return;
+    if(!boolVal(data[pending.k]))return;
+    const p=clearPathCheck(id);
+    if(p&&typeof p.res==='function')p.res(true);
   });
 }
 function bindDirectNative(){
@@ -2639,7 +3564,7 @@ function bindDirectNative(){
 }
 function startWatch(id,payload,ms){
   clearWatch(id);
-  const out=isObj(payload)&&isObj(payload.argument)&&payload.argument.outputPath?String(payload.argument.outputPath):'';
+  const out=isObj(payload)&&payload.outputPath?String(payload.outputPath):(isObj(payload)&&isObj(payload.argument)&&payload.argument.outputPath?String(payload.argument.outputPath):'');
   if(!out)return;
   const key=`reports_db_${String(id).replace(/[^a-zA-Z0-9_-]/g,'_')}`;
   const started=Date.now();
@@ -2660,10 +3585,14 @@ function requestDb(event,payload,ms){
   return new Promise((resolve,reject)=>{
     addPending(id,resolve,reject,ms);
     try{
-      const sdk=window.parent&&window.parent.sdk;
+      const sdk=(window.parent&&window.parent.sdk)||(window.sdk||null);
       if(bindDirectNative()&&sdk&&typeof sdk.command==='function'){
         if(event==='reportsDocBuilderRun'){startWatch(id,d,ms);sdk.command('docbuilder:run',JSON.stringify(d));return;}
         if(event==='reportsDocBuilderProbe'){sdk.command('docbuilder:probe',JSON.stringify(d));return;}
+      }
+      if(window.parent&&window.parent!==window){
+        post({event,source:'reports-ui',data:{requestId:id,payload:d}});
+        return;
       }
     }catch(_){ }
     post({event,source:'reports-ui',data:{requestId:id,payload:d}});
@@ -2671,6 +3600,55 @@ function requestDb(event,payload,ms){
 }
 function runDb(p){const d=isObj(p)?Object.assign({},p):{};if(!d.requestId)d.requestId=reqId('docbuilder-run');const n=d&&d.argument&&Array.isArray(d.argument.actions)?d.argument.actions.length:1;const t=Math.max(120000,120000+n*4500);return requestDb('reportsDocBuilderRun',d,t);}
 function probeDb(p){const d=isObj(p)?Object.assign({},p):{};if(!d.requestId)d.requestId=reqId('docbuilder-probe');return requestDb('reportsDocBuilderProbe',d,30000);}
+function waitForPathExists(path,timeoutMs,pollMs){
+  const target=normSlashes(path);
+  return new Promise((resolve,reject)=>{
+    try{
+      const sdk=(window.parent&&window.parent.sdk)||(window.sdk||null);
+      if(!bindDirectNative()||!sdk||typeof sdk.command!=='function'){
+        const e=new Error('Native file bridge unavailable');
+        e.details={error:'bridge_unavailable',path:target};
+        reject(e);
+        return;
+      }
+      const id=reqId('reports-path-check');
+      const key=`reports_path_${String(id).replace(/[^a-zA-Z0-9_-]/g,'_')}`;
+      const body={};body[key]=target;
+      const tick=()=>{
+        try{sdk.command('files:check',JSON.stringify(body));}catch(_){ }
+      };
+      PATH_CHECK_PENDING[id]={
+        k:key,
+        res:resolve,
+        i:setInterval(tick,Math.max(150,toInt(pollMs,350)||350)),
+        t:setTimeout(()=>{
+          const p=clearPathCheck(id);
+          if(!p)return;
+          const e=new Error('File check timeout');
+          e.details={error:'timeout',path:target};
+          reject(e);
+        },Math.max(500,toInt(timeoutMs,5000)||5000))
+      };
+      tick();
+    }catch(err){
+      reject(err);
+    }
+  });
+}
+async function ensureOutputExists(path,timeoutMs){
+  const total=Math.max(1000,toInt(timeoutMs,8000)||8000);
+  const started=Date.now();
+  while(Date.now()-started<total){
+    const remaining=Math.max(250,total-(Date.now()-started));
+    try{
+      await waitForPathExists(path,Math.min(remaining,1200),250);
+      return true;
+    }catch(_){ }
+    if(await canReadBinaryFile(path,Math.min(remaining,1200)))return true;
+    await new Promise(resolve=>setTimeout(resolve,200));
+  }
+  return false;
+}
 function normalizeDbResult(raw){
   if(!isObj(raw))return null;
   let out=raw;
@@ -2714,12 +3692,425 @@ function openResult(path,scenarioId){
   const typeId=extType(fullPath);
   post({event:'reportsOpenFile',source:'reports-ui',data:{id:null,path:fullPath,typeId}});
 }
-function openTemplateInEditor(id){
+async function openTemplateInEditor(id){
   const sc=state.scenarios.find(x=>x.id===id);
   if(!sc||!sc.templatePath){toast('Шаблон не задан.','error');return;}
-  const tpl=resolveTemplate(sc.templatePath);
-  if(!tpl){toast('Некорректный путь к шаблону.','error');return;}
-  openResult(tpl,id);
+  try{
+    const tpl=await ensureReadableTemplatePath(sc.templatePath);
+    openResult(tpl,id);
+  }catch(err){
+    toast(err&&err.message?err.message:'Некорректный путь к шаблону.','error');
+  }
+}
+
+function extractSourceProbePayload(errorLike){
+  const texts=[];
+  if(errorLike&&errorLike.details){
+    if(errorLike.details.stderr)texts.push(String(errorLike.details.stderr));
+    if(errorLike.details.stdout)texts.push(String(errorLike.details.stdout));
+    if(errorLike.details.details)texts.push(String(errorLike.details.details));
+  }
+  if(errorLike&&errorLike.message)texts.push(String(errorLike.message));
+  for(let i=0;i<texts.length;i+=1){
+    const text=String(texts[i]||'');
+    const idx=text.lastIndexOf(SOURCE_PROBE_PREFIX);
+    if(idx<0)continue;
+    const chunk=text.slice(idx+SOURCE_PROBE_PREFIX.length).split(/\r?\n/)[0].trim();
+    if(!chunk)continue;
+    try{return JSON.parse(chunk);}catch(_){ }
+  }
+  return null;
+}
+function sourceProbeErrors(payload){
+  if(!payload)return [];
+  const errors=Array.isArray(payload.errors)?payload.errors:[];
+  return errors
+    .map(item=>{
+      if(isObj(item)&&item.message)return String(item.message).trim();
+      return String(item||'').trim();
+    })
+    .filter(Boolean);
+}
+function sourceProbeWarnings(payload){
+  if(!payload)return [];
+  const warnings=Array.isArray(payload.warnings)?payload.warnings:[];
+  return warnings
+    .map(item=>{
+      if(isObj(item)&&item.message)return String(item.message).trim();
+      return String(item||'').trim();
+    })
+    .filter(Boolean);
+}
+function formatSourceProbeSummary(payload){
+  if(!payload)return 'Проверка файла не выполнена.';
+  if(payload.ok){
+    const fields=Array.isArray(payload.fields)?payload.fields.length:0;
+    const lists=Array.isArray(payload.lists)?payload.lists.length:0;
+    const tables=Array.isArray(payload.tables)?payload.tables.length:0;
+    const listItems=(Array.isArray(payload.lists)?payload.lists:[]).reduce((sum,list)=>sum+(parseInt(list&&list.itemsCount,10)||0),0);
+    const rows=(Array.isArray(payload.tables)?payload.tables:[]).reduce((sum,table)=>sum+(parseInt(table&&table.rowsCount,10)||0),0);
+    const parts=[`Поля: ${fields}`,`Списки: ${lists}`,`Таблицы: ${tables}`];
+    if(listItems>0)parts.push(`Элементы списков: ${listItems}`);
+    if(rows>0)parts.push(`Строки: ${rows}`);
+    return `Файл проверен. ${parts.join('. ')}.`;
+  }
+  const errors=sourceProbeErrors(payload);
+  return errors.length?errors[0]:'Файл не прошел проверку.';
+}
+function sourceProbeSchemaKey(scenario){
+  return JSON.stringify({
+    config:getScenarioSourceConfig(scenario)||{},
+    schema:getScenarioSourceSchema(scenario)||{}
+  });
+}
+function sourceProbeCacheKey(scenario,filePath,fileObject){
+  const normalized=normSlashes(toFsPath(filePath)||'');
+  const fileMeta=fileObject?{
+    size:typeof fileObject.size==='number'?fileObject.size:'',
+    lastModified:typeof fileObject.lastModified==='number'?fileObject.lastModified:''
+  }:{size:'',lastModified:''};
+  return JSON.stringify({
+    scenarioId:String(scenario&&scenario.id||''),
+    path:normalized,
+    file:fileMeta,
+    schema:sourceProbeSchemaKey(scenario)
+  });
+}
+function getCachedSourceProbe(scenario,filePath,fileObject){
+  const key=sourceProbeCacheKey(scenario,filePath,fileObject);
+  const cached=SOURCE_PROBE_CACHE[key];
+  if(!cached)return null;
+  if(Date.now()-cached.ts>SOURCE_PROBE_CACHE_TTL){
+    delete SOURCE_PROBE_CACHE[key];
+    return null;
+  }
+  return cached.payload||null;
+}
+function setCachedSourceProbe(scenario,filePath,fileObject,payload){
+  SOURCE_PROBE_CACHE[sourceProbeCacheKey(scenario,filePath,fileObject)]={ts:Date.now(),payload};
+}
+function renderRunSourcePreview(payload){
+  if(!els.runSourcePreview)return;
+  const root=els.runSourcePreview;
+  root.innerHTML='';
+  if(!payload||(!Array.isArray(payload.fields)&&!Array.isArray(payload.lists)&&!Array.isArray(payload.tables))){
+    root.classList.add('hidden');
+    return;
+  }
+  const warnings=sourceProbeWarnings(payload);
+  if(warnings.length){
+    const warningBox=document.createElement('div');
+    warningBox.className='run-source-error';
+    warningBox.textContent=warnings.join('\n');
+    root.appendChild(warningBox);
+  }
+  const fields=Array.isArray(payload.fields)?payload.fields:[];
+  if(fields.length){
+    const grid=document.createElement('div');
+    grid.className='run-source-preview-grid';
+    fields.forEach(field=>{
+      const card=document.createElement('div');
+      card.className='run-source-preview-card';
+      const label=document.createElement('div');
+      label.className='run-source-preview-label';
+      label.textContent=String(field&&field.label||field&&field.key||'Поле');
+      const value=document.createElement('div');
+      value.className='run-source-preview-value';
+      const display=field&&field.displayValue!==undefined&&field.displayValue!==null?field.displayValue:field&&field.value;
+      value.textContent=String(display==null?'':display) || '—';
+      card.appendChild(label);
+      card.appendChild(value);
+      grid.appendChild(card);
+    });
+    root.appendChild(grid);
+  }
+  const lists=Array.isArray(payload.lists)?payload.lists:[];
+  lists.forEach(list=>{
+    const box=document.createElement('div');
+    box.className='run-source-table';
+    const head=document.createElement('div');
+    head.className='run-source-table-head';
+    const title=document.createElement('div');
+    title.className='run-source-preview-label';
+    title.textContent=String(list&&list.label||list&&list.key||'Список');
+    const meta=document.createElement('div');
+    meta.className='run-source-table-meta';
+    const count=Math.max(0,parseInt(list&&list.itemsCount,10)||0);
+    const shown=Array.isArray(list&&list.previewItems)?list.previewItems.length:0;
+    meta.textContent=count>shown&&shown>0?`Найдено элементов: ${count}. Показано: ${shown}.`:`Найдено элементов: ${count}.`;
+    head.appendChild(title);
+    head.appendChild(meta);
+    box.appendChild(head);
+    const items=Array.isArray(list&&list.previewItems)?list.previewItems:[];
+    if(items.length){
+      const wrap=document.createElement('div');
+      wrap.className='run-source-table-wrap';
+      const tbl=document.createElement('table');
+      const thead=document.createElement('thead');
+      const hrow=document.createElement('tr');
+      const th=document.createElement('th');
+      th.textContent='Значение';
+      hrow.appendChild(th);
+      thead.appendChild(hrow);
+      tbl.appendChild(thead);
+      const tbody=document.createElement('tbody');
+      items.forEach(item=>{
+        const tr=document.createElement('tr');
+        const td=document.createElement('td');
+        td.textContent=String(item==null?'':item);
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+      });
+      tbl.appendChild(tbody);
+      wrap.appendChild(tbl);
+      box.appendChild(wrap);
+    }
+    root.appendChild(box);
+  });
+  const tables=Array.isArray(payload.tables)?payload.tables:[];
+  tables.forEach(table=>{
+    const box=document.createElement('div');
+    box.className='run-source-table';
+    const head=document.createElement('div');
+    head.className='run-source-table-head';
+    const title=document.createElement('div');
+    title.className='run-source-preview-label';
+    title.textContent=String(table&&table.label||table&&table.key||'Таблица');
+    const meta=document.createElement('div');
+    meta.className='run-source-table-meta';
+    const count=Math.max(0,parseInt(table&&table.rowsCount,10)||0);
+    const shown=Array.isArray(table&&table.previewRows)?table.previewRows.length:0;
+    meta.textContent=count>shown&&shown>0?`Найдено строк: ${count}. Показано: ${shown}.`:`Найдено строк: ${count}.`;
+    head.appendChild(title);
+    head.appendChild(meta);
+    box.appendChild(head);
+    const columns=Array.isArray(table&&table.columns)?table.columns:[];
+    const rows=Array.isArray(table&&table.previewRows)?table.previewRows:[];
+    if(columns.length&&rows.length){
+      const wrap=document.createElement('div');
+      wrap.className='run-source-table-wrap';
+      const tbl=document.createElement('table');
+      const thead=document.createElement('thead');
+      const hrow=document.createElement('tr');
+      columns.forEach(column=>{
+        const th=document.createElement('th');
+        th.textContent=String(column&&column.label||column&&column.key||'');
+        hrow.appendChild(th);
+      });
+      thead.appendChild(hrow);
+      tbl.appendChild(thead);
+      const tbody=document.createElement('tbody');
+      rows.forEach(row=>{
+        const tr=document.createElement('tr');
+        columns.forEach(column=>{
+          const td=document.createElement('td');
+          const key=String(column&&column.key||'').trim();
+          const value=isObj(row)&&Object.prototype.hasOwnProperty.call(row,key)?row[key]:'';
+          td.textContent=String(value==null?'':value);
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      tbl.appendChild(tbody);
+      wrap.appendChild(tbl);
+      box.appendChild(wrap);
+    }
+    root.appendChild(box);
+  });
+  root.classList.remove('hidden');
+}
+function syncRunSubmitState(){
+  const ctx=state.runInput;
+  if(!els.btnRunInputSubmit)return;
+  if(!ctx){
+    els.btnRunInputSubmit.disabled=false;
+    return;
+  }
+  const sourceEnabled=!!ctx.sourceEnabled;
+  const needsSource=sourceEnabled&&!!ctx.sourceRequired;
+  const hasValidSource=!sourceEnabled||(!ctx.sourceBusy&&(!ctx.sourceFilePath?!needsSource:!!(ctx.sourceProbeResult&&ctx.sourceProbeResult.ok)));
+  els.btnRunInputSubmit.disabled=!!ctx.sourceBusy||!hasValidSource;
+}
+function refreshRunSourceUi(){
+  const ctx=state.runInput;
+  if(!els.runSourceSection)return;
+  if(!ctx||!ctx.sourceEnabled){
+    els.runSourceSection.classList.add('hidden');
+    if(els.runSourceFilePath)els.runSourceFilePath.value='';
+    if(els.runSourceStatus){
+      els.runSourceStatus.className='run-source-status is-idle';
+    }
+    if(els.runSourceStatusText)els.runSourceStatusText.textContent='Файл не выбран';
+    if(els.runSourceError){
+      els.runSourceError.textContent='';
+      els.runSourceError.classList.add('hidden');
+    }
+    if(els.runSourcePreview){
+      els.runSourcePreview.innerHTML='';
+      els.runSourcePreview.classList.add('hidden');
+    }
+    syncRunSubmitState();
+    return;
+  }
+  els.runSourceSection.classList.remove('hidden');
+  if(els.runSourceSubtitle){
+    const exts=(Array.isArray(ctx.sourceConfig&&ctx.sourceConfig.accept)?ctx.sourceConfig.accept:[]).map(ext=>`.${String(ext||'').replace(/^\./,'')}`);
+    els.runSourceSubtitle.textContent=`Выберите файл ${exts.length?exts.join(', '):'.xlsx'} и дождитесь проверки структуры.`;
+  }
+  if(els.runSourceFilePath)els.runSourceFilePath.value=ctx.sourceFilePath||'';
+  if(els.btnRunSourcePick)els.btnRunSourcePick.disabled=!!ctx.sourceBusy;
+  if(els.runSourceStatus){
+    els.runSourceStatus.className=`run-source-status ${ctx.sourceBusy?'is-busy':(ctx.sourceProbeResult&&ctx.sourceProbeResult.ok?'is-ok':(ctx.sourceError||ctx.sourceFilePath?'is-error':'is-idle'))}`.trim();
+  }
+  if(els.runSourceStatusText){
+    if(ctx.sourceBusy)els.runSourceStatusText.textContent='Проверка структуры файла через DocumentBuilder...';
+    else if(ctx.sourceProbeResult)els.runSourceStatusText.textContent=formatSourceProbeSummary(ctx.sourceProbeResult);
+    else if(ctx.sourceError)els.runSourceStatusText.textContent=ctx.sourceError;
+    else els.runSourceStatusText.textContent='Файл не выбран';
+  }
+  if(els.runSourceError){
+    const errorText=ctx.sourceError||'';
+    els.runSourceError.textContent=errorText;
+    els.runSourceError.classList.toggle('hidden',!errorText);
+  }
+  renderRunSourcePreview(ctx.sourceProbeResult&&ctx.sourceProbeResult.ok?ctx.sourceProbeResult:null);
+  syncRunSubmitState();
+}
+function isAcceptedSourceFile(path,config){
+  const exts=Array.isArray(config&&config.accept)?config.accept:[];
+  if(!exts.length)return true;
+  const match=String(path||'').trim().toLowerCase().match(/\.([a-z0-9]+)$/);
+  if(!match)return false;
+  return exts.indexOf(match[1])>=0;
+}
+async function runSourceProbe(scenario,filePath){
+  const sourceConfig=getScenarioSourceConfig(scenario);
+  const probe=await ensureProbe(false);
+  const timeoutMs=Math.max(5000,toInt(sourceConfig&&sourceConfig.probeTimeoutMs,45000)||45000);
+  const resultPath=makeProbeResultPath();
+  const wrapperPath=await materializeDocbuilderScript(SOURCE_PROBE_SCRIPT,{
+    sourceFilePath:filePath,
+    resultPath,
+    sourceFileConfigJson:JSON.stringify(sourceConfig||{}),
+    sourceSchemaJson:JSON.stringify(getScenarioSourceSchema(scenario)||{})
+  },'probe',{
+    SOURCE_FILE_PATH:filePath,
+    RESULT_PATH:resultPath
+  });
+  const payload={
+    requestId:reqId('docbuilder-source-probe'),
+    script:wrapperPath,
+    workDir:pickDocbuilderWorkDir(probe),
+    outputPath:resultPath,
+    openAfterRun:false,
+    timeoutMs
+  };
+  try{
+    const runPromise=runDb(payload);
+    runPromise.catch(()=>{});
+    const fileReadyPromise=waitProbeResultFile(resultPath,timeoutMs,200);
+    return await Promise.race([
+      fileReadyPromise,
+      (async()=>{
+        await runPromise;
+        return await readProbeResultFile(resultPath,1500);
+      })()
+    ]);
+  }catch(err){
+    try{return await readProbeResultFile(resultPath,2500);}catch(_){ }
+    const parsed=extractSourceProbePayload(err);
+    if(parsed)return parsed;
+    throw err;
+  }finally{
+    deletePath(resultPath,2500).catch(()=>{});
+    deletePath(wrapperPath,2500).catch(()=>{});
+  }
+}
+async function beginRunSourceProbe(filePath,fileObject){
+  const ctx=state.runInput;
+  if(!ctx||!ctx.sourceEnabled)return;
+  const normalized=toFsPath(filePath);
+  if(!normalized){
+    ctx.sourceFilePath='';
+    ctx.sourceProbeResult=null;
+    ctx.sourceError='Не удалось определить путь к выбранному файлу.';
+    ctx.sourceBusy=false;
+    refreshRunSourceUi();
+    return;
+  }
+  if(fileObject&&ctx.sourceConfig&&ctx.sourceConfig.maxFileSizeMb){
+    const maxBytes=ctx.sourceConfig.maxFileSizeMb*1024*1024;
+    if(fileObject.size>maxBytes){
+      ctx.sourceFilePath=normalized;
+      ctx.sourceProbeResult=null;
+      ctx.sourceError=`Файл превышает лимит ${ctx.sourceConfig.maxFileSizeMb} MB.`;
+      ctx.sourceBusy=false;
+      refreshRunSourceUi();
+      return;
+    }
+  }
+  if(!isAcceptedSourceFile(normalized,ctx.sourceConfig)){
+    ctx.sourceFilePath=normalized;
+    ctx.sourceProbeResult=null;
+    ctx.sourceError='Неподдерживаемый формат файла.';
+    ctx.sourceBusy=false;
+    refreshRunSourceUi();
+    return;
+  }
+  ctx.sourceFilePath=normalized;
+  const cached=getCachedSourceProbe(ctx.scenario,normalized,fileObject);
+  if(cached){
+    ctx.sourceProbeResult=cached;
+    ctx.sourceError=cached&&cached.ok?'':(sourceProbeErrors(cached).join('\n')||formatSourceProbeSummary(cached));
+    ctx.sourceBusy=false;
+    refreshRunSourceUi();
+    return;
+  }
+  ctx.sourceProbeResult=null;
+  ctx.sourceError='';
+  ctx.sourceBusy=true;
+  ctx.sourceSeq=(ctx.sourceSeq||0)+1;
+  const seq=ctx.sourceSeq;
+  refreshRunSourceUi();
+  try{
+    const payload=await runSourceProbe(ctx.scenario,normalized);
+    if(state.runInput!==ctx||ctx.sourceSeq!==seq)return;
+    ctx.sourceProbeResult=payload;
+    ctx.sourceError=payload&&payload.ok?'':(sourceProbeErrors(payload).join('\n')||formatSourceProbeSummary(payload));
+    ctx.sourceBusy=false;
+    if(payload&&payload.ok)setCachedSourceProbe(ctx.scenario,normalized,fileObject,payload);
+    refreshRunSourceUi();
+  }catch(err){
+    if(state.runInput!==ctx||ctx.sourceSeq!==seq)return;
+    ctx.sourceProbeResult=null;
+    ctx.sourceBusy=false;
+    ctx.sourceError=`Ошибка проверки: ${dbReason(err)}`;
+    refreshRunSourceUi();
+  }
+}
+function pickRunSourceFile(){
+  const ctx=state.runInput;
+  if(!ctx||!ctx.sourceEnabled)return;
+  try{
+    const sdk=window.parent&&window.parent.sdk;
+    const sourcePath=ctx.sourceFilePath?dirName(ctx.sourceFilePath):getReportsUiDir();
+    if(sdk&&typeof sdk.command==='function'&&sourcePath)sdk.command('files:setOpenPath',sourcePath);
+  }catch(_){ }
+  try{
+    const asc=window.parent&&window.parent.AscDesktopEditor;
+    if(asc&&typeof asc.OpenFilenameDialog==='function'){
+      asc.OpenFilenameDialog('cell',false,function(files){
+        const file=Array.isArray(files)?files[0]:files;
+        if(!file)return;
+        beginRunSourceProbe(String(file),null);
+      });
+      return;
+    }
+  }catch(_){ }
+  if(els.runSourceFileInput){
+    els.runSourceFileInput.value='';
+    els.runSourceFileInput.click();
+  }
 }
 
 function closeRunInputModal(result){
@@ -2728,6 +4119,8 @@ function closeRunInputModal(result){
   state.runInput=null;
   if(els.runInputModal)els.runInputModal.classList.add('hidden');
   if(els.runInputFields)els.runInputFields.innerHTML='';
+  if(els.runSourceFileInput)els.runSourceFileInput.value='';
+  refreshRunSourceUi();
   renderList();
   if(typeof ctx.resolve==='function')ctx.resolve(result);
 }
@@ -3141,16 +4534,34 @@ function submitRunInputModal(){
     }
     values[field.id]=value;
   }
-  closeRunInputModal(values);
+  if(ctx.sourceEnabled){
+    if(ctx.sourceBusy){
+      toast('Дождитесь завершения проверки файла.','error');
+      return;
+    }
+    if(ctx.sourceRequired&&!ctx.sourceFilePath){
+      toast('Выберите файл с исходными данными.','error');
+      return;
+    }
+    if(ctx.sourceFilePath&&(!ctx.sourceProbeResult||!ctx.sourceProbeResult.ok)){
+      const errors=sourceProbeErrors(ctx.sourceProbeResult);
+      toast(errors[0]||ctx.sourceError||'Файл с исходными данными не прошел проверку.','error');
+      return;
+    }
+  }
+  closeRunInputModal({inputValues:values,sourceFilePath:ctx.sourceFilePath||'',sourceProbeResult:ctx.sourceProbeResult||null});
 }
 
 function openRunInputModal(sc){
   const fields=(Array.isArray(sc&&sc.inputFields)?sc.inputFields:[]).map(normInputField);
-  if(!fields.length)return Promise.resolve({});
+  const sourceConfig=getScenarioSourceConfig(sc);
+  const sourceEnabled=!!sourceConfig.enabled;
+  if(!fields.length&&!sourceEnabled)return Promise.resolve({inputValues:{},sourceFilePath:'',sourceProbeResult:null});
   return new Promise(resolve=>{
     const inputs=Object.create(null);
     const fieldsById=Object.create(null);
     const childrenByParent=Object.create(null);
+    const sourceRequired=sourceEnabled&&(!!sourceConfig.required||scenarioUsesSourceActions(sc));
     fields.forEach(field=>{
       fieldsById[field.id]=field;
       const parentId=String(field.depends_on||'').trim();
@@ -3159,7 +4570,21 @@ function openRunInputModal(sc){
         childrenByParent[parentId].push(field.id);
       }
     });
-    state.runInput={resolve,scenarioId:sc.id,fields,inputs};
+    state.runInput={
+      resolve,
+      scenarioId:sc.id,
+      scenario:sc,
+      fields,
+      inputs,
+      sourceEnabled,
+      sourceRequired,
+      sourceConfig,
+      sourceFilePath:'',
+      sourceProbeResult:null,
+      sourceError:'',
+      sourceBusy:false,
+      sourceSeq:0
+    };
     renderList();
     if(els.runInputTitle)els.runInputTitle.textContent=`Заполнение: ${sc.name}`;
     if(els.runInputFields){
@@ -3186,6 +4611,12 @@ function openRunInputModal(sc){
         wrap.appendChild(ctrlWrap);
         els.runInputFields.appendChild(wrap);
       });
+      if(!fields.length){
+        const empty=document.createElement('div');
+        empty.className='source-empty';
+        empty.textContent='Ручные поля для ввода не настроены.';
+        els.runInputFields.appendChild(empty);
+      }
     }
 
     const refreshDependentField=(fieldId,stack)=>{
@@ -3224,9 +4655,14 @@ function openRunInputModal(sc){
       }
     });
 
+    refreshRunSourceUi();
     if(els.runInputModal)els.runInputModal.classList.remove('hidden');
+    if(sourceEnabled){
+      ensureProbe(false).catch(()=>{});
+    }
     const first=fields.length&&inputs[fields[0].id];
     if(first&&typeof first.focus==='function')setTimeout(()=>first.focus(),10);
+    else if(sourceEnabled&&els.btnRunSourcePick)setTimeout(()=>els.btnRunSourcePick.focus(),10);
   });
 }
 
@@ -3365,43 +4801,289 @@ function buildInputActions(sc,inputValues){
   return out;
 }
 
-function buildRunActions(sc,inputValues){
+function sourceProbeLookup(items,key){
+  const list=Array.isArray(items)?items:[];
+  const wanted=String(key||'').trim().toLowerCase();
+  for(let i=0;i<list.length;i+=1){
+    const item=list[i];
+    const itemKey=String(item&&item.key||'').trim().toLowerCase();
+    if(itemKey&&itemKey===wanted)return item;
+  }
+  return null;
+}
+function sourceValueModeJs(type,value){
+  const normalized=String(type||'text').trim().toLowerCase();
+  if(normalized==='number')return (value===''||value===null||value===undefined||Number.isNaN(Number(value)))?'text':'number';
+  if(normalized==='date'&&typeof value==='number')return 'number';
+  return 'text';
+}
+function makeRuntimeSetCellAction(base,sheet,range,value,mode){
+  const action={
+    id:uid('action'),
+    type:'set_cell_value',
+    sheet:String(sheet||'').trim(),
+    range:String(range||'').trim(),
+    named_range:false,
+    mode:String(mode||'text'),
+    value,
+    merge:false,
+    keep_template_format:!!(base&&base.keep_template_format),
+    apply_alignment:false,
+    horizontal:'',
+    vertical:'',
+    wrap:false,
+    apply_number_format:false,
+    format_preset:'general',
+    decimals:'2',
+    use_thousands:false,
+    currency_symbol:'₽',
+    negative_red:false,
+    custom_format:'General',
+    format:'General',
+    apply_font:false,
+    font_name:'Arial',
+    font_size:'11',
+    bold:false,
+    italic:false,
+    underline:'none',
+    strikeout:false,
+    font_color:'auto',
+    apply_fill:false,
+    fill_color:'none'
+  };
+  normalizeInsertStyleSettings(action,action);
+  return action;
+}
+function makeRuntimeInsertRowsAction(sheet,row){
+  return {
+    id:uid('action'),
+    type:'insert_rows',
+    sheet:String(sheet||'').trim(),
+    start_row:String(row),
+    count:'1'
+  };
+}
+function makeRuntimeCopyTemplateRowAction(sheet,templateRange,targetRow){
+  const parsed=parseA1Range(templateRange);
+  if(!parsed)return null;
+  return {
+    id:uid('action'),
+    type:'copy_template_row',
+    from_sheet:String(sheet||'').trim(),
+    from_range:String(templateRange||'').trim(),
+    to_sheet:String(sheet||'').trim(),
+    to_cell:`${numberToColLetters(parsed.c1)}${targetRow}`,
+    paste_type:'xlPasteAll',
+    operation:'xlPasteSpecialOperationNone',
+    skip_blanks:false,
+    transpose:false
+  };
+}
+function normalizeSheetInsertKey(sheet){
+  return String(sheet||'').trim().toLowerCase();
+}
+function addSheetInsertEvent(events,sheet,row,count){
+  const key=normalizeSheetInsertKey(sheet);
+  if(!key)return;
+  if(!Array.isArray(events[key]))events[key]=[];
+  events[key].push({
+    row:Math.max(1,parseInt(row,10)||1),
+    count:Math.max(1,parseInt(count,10)||1)
+  });
+  events[key].sort((a,b)=>a.row-b.row);
+}
+function shiftRowByInsertEvents(events,sheet,row){
+  let current=Math.max(1,parseInt(row,10)||1);
+  const list=events[normalizeSheetInsertKey(sheet)];
+  if(!Array.isArray(list)||!list.length)return current;
+  for(let i=0;i<list.length;i+=1){
+    if(current>=list[i].row)current+=list[i].count;
+  }
+  return current;
+}
+function shiftRangeByInsertEvents(events,sheet,raw){
+  const parsed=parseA1Range(raw);
+  if(!parsed)return null;
+  return {
+    c1:parsed.c1,
+    c2:parsed.c2,
+    r1:shiftRowByInsertEvents(events,sheet,parsed.r1),
+    r2:shiftRowByInsertEvents(events,sheet,parsed.r2)
+  };
+}
+function expandSourceActions(actions,sourceProbeResult){
+  const inputActions=Array.isArray(actions)?actions:[];
+  const payload=isObj(sourceProbeResult)?sourceProbeResult:null;
+  const fields=Array.isArray(payload&&payload.fields)?payload.fields:[];
+  const lists=Array.isArray(payload&&payload.lists)?payload.lists:[];
+  const tables=Array.isArray(payload&&payload.tables)?payload.tables:[];
+  const out=[];
+  const insertEvents=Object.create(null);
+  for(let i=0;i<inputActions.length;i+=1){
+    const action=normAction(inputActions[i]);
+    if(action.type==='insert_source_field'){
+      const sourceField=sourceProbeLookup(fields,action.source_field_id);
+      if(!sourceField)throw new Error(`Источник не содержит поле "${String(action.source_field_id||'').trim()}".`);
+      const parsedTargets=parseCellBindings(action.targets);
+      const targets=parsedTargets.error?[]:parsedTargets.items;
+      const bindings=targets.length?targets:[{sheet:String(action.sheet||'Лист1').trim(),range:String(action.range||'A1').trim()}];
+      bindings.forEach(target=>{
+        const shiftedRange=shiftRangeByInsertEvents(insertEvents,target.sheet,target.range);
+        const range=shiftedRange?formatA1Range(shiftedRange):String(target.range||'').trim();
+        out.push(makeRuntimeSetCellAction(action,target.sheet,range,sourceField.value,sourceValueModeJs(sourceField.type,sourceField.value)));
+      });
+      continue;
+    }
+    if(action.type==='insert_source_list'){
+      const sourceList=sourceProbeLookup(lists,action.source_list_id);
+      if(!sourceList)throw new Error(`Источник не содержит список "${String(action.source_list_id||'').trim()}".`);
+      const parsedTargets=parseTableTargets(action.targets);
+      const targets=parsedTargets.error?[]:parsedTargets.items;
+      const bindings=targets.length?targets:[{
+        sheet:String(action.sheet||'Лист1').trim(),
+        anchor_cell:String(action.anchor_cell||'A1').trim(),
+        template_row_range:String(action.template_row_range||'A1:D1').trim()
+      }];
+      const items=Array.isArray(sourceList.items)?sourceList.items:[];
+      bindings.forEach(binding=>{
+        const anchor=shiftRangeByInsertEvents(insertEvents,binding.sheet,binding.anchor_cell);
+        if(!anchor)throw new Error(`Неверная точка вставки списка: ${binding.anchor_cell}`);
+        const insertRows=String(action.insert_mode||'insert_rows').trim().toLowerCase()==='insert_rows';
+        const shiftedTemplateRange=shiftRangeByInsertEvents(insertEvents,binding.sheet,binding.template_row_range);
+        const templateRowRange=shiftedTemplateRange?formatA1Range(shiftedTemplateRange):String(binding.template_row_range||'').trim();
+        for(let itemIndex=0;itemIndex<items.length;itemIndex+=1){
+          const targetRow=anchor.r1+itemIndex;
+          if(insertRows&&itemIndex>0){
+            out.push(makeRuntimeInsertRowsAction(binding.sheet,targetRow));
+            addSheetInsertEvent(insertEvents,binding.sheet,targetRow,1);
+          }
+          if(action.keep_template_format&&(itemIndex>0||!insertRows)){
+            const copyAction=makeRuntimeCopyTemplateRowAction(binding.sheet,templateRowRange,targetRow);
+            if(copyAction)out.push(copyAction);
+          }
+          out.push(makeRuntimeSetCellAction(action,binding.sheet,`${numberToColLetters(anchor.c1)}${targetRow}`,items[itemIndex],sourceValueModeJs(sourceList.type,items[itemIndex])));
+        }
+      });
+      continue;
+    }
+    if(action.type==='insert_source_table'){
+      const sourceTable=sourceProbeLookup(tables,action.source_table_id);
+      if(!sourceTable)throw new Error(`Источник не содержит таблицу "${String(action.source_table_id||'').trim()}".`);
+      const parsedTargets=parseTableTargets(action.targets);
+      const targets=parsedTargets.error?[]:parsedTargets.items;
+      const bindings=targets.length?targets:[{
+        sheet:String(action.sheet||'Лист1').trim(),
+        anchor_cell:String(action.anchor_cell||'A1').trim(),
+        template_row_range:String(action.template_row_range||'A1:D1').trim()
+      }];
+      const parsedMappings=parseActionSourceMappings(action.mappings);
+      if(parsedMappings.error)throw new Error(parsedMappings.error);
+      const columns=Array.isArray(sourceTable.columns)?sourceTable.columns:[];
+      const columnTypes=Object.create(null);
+      columns.forEach(column=>{columnTypes[String(column&&column.key||'').trim()]=String(column&&column.type||'text').trim().toLowerCase()||'text';});
+      const rows=Array.isArray(sourceTable.rows)?sourceTable.rows:[];
+      bindings.forEach(binding=>{
+        const anchor=shiftRangeByInsertEvents(insertEvents,binding.sheet,binding.anchor_cell);
+        if(!anchor)throw new Error(`Неверная точка вставки таблицы: ${binding.anchor_cell}`);
+        const insertRows=String(action.insert_mode||'insert_rows').trim().toLowerCase()==='insert_rows';
+        const shiftedTemplateRange=shiftRangeByInsertEvents(insertEvents,binding.sheet,binding.template_row_range);
+        const templateRowRange=shiftedTemplateRange?formatA1Range(shiftedTemplateRange):String(binding.template_row_range||'').trim();
+        for(let rowIndex=0;rowIndex<rows.length;rowIndex+=1){
+          const targetRow=anchor.r1+rowIndex;
+          if(insertRows&&rowIndex>0){
+            out.push(makeRuntimeInsertRowsAction(binding.sheet,targetRow));
+            addSheetInsertEvent(insertEvents,binding.sheet,targetRow,1);
+          }
+          if(action.keep_template_format&&(rowIndex>0||!insertRows)){
+            const copyAction=makeRuntimeCopyTemplateRowAction(binding.sheet,templateRowRange,targetRow);
+            if(copyAction)out.push(copyAction);
+          }
+          const row=rows[rowIndex]&&typeof rows[rowIndex]==='object'?rows[rowIndex]:{};
+          parsedMappings.items.forEach(mapping=>{
+            const cellValue=row[mapping.sourceKey];
+            out.push(makeRuntimeSetCellAction(action,binding.sheet,`${mapping.targetColumn}${targetRow}`,cellValue,sourceValueModeJs(columnTypes[mapping.sourceKey],cellValue)));
+          });
+        }
+      });
+      continue;
+    }
+    out.push(action);
+  }
+  return out;
+}
+
+function buildRunActions(sc,inputValues,sourceProbeResult){
   const base=(Array.isArray(sc&&sc.actions)?sc.actions.map(normAction):[]).filter(action=>evaluateActionCondition(action,inputValues,sc));
   const extra=buildInputActions(sc,inputValues);
-  return extra.concat(base);
+  return expandSourceActions(extra.concat(base),sourceProbeResult);
 }
 
 async function runScenario(id){
   const sc=state.scenarios.find(x=>x.id===id);if(!sc||state.running||state.runInput)return;
-  const tpl=resolveTemplate(sc.templatePath);if(!tpl){toast('Некорректный путь к шаблону.','error');return;}
-  const inputValues=await openRunInputModal(sc);
-  if(inputValues===null)return;
+  let tpl='';
+  try{tpl=await ensureReadableTemplatePath(sc.templatePath);}catch(err){toast(err&&err.message?err.message:'Некорректный путь к шаблону.','error');return;}
+  const runInput=await openRunInputModal(sc);
+  if(runInput===null)return;
+  const inputValues=isObj(runInput)&&isObj(runInput.inputValues)?runInput.inputValues:{};
+  const sourceProbeResult=isObj(runInput)&&isObj(runInput.sourceProbeResult)?runInput.sourceProbeResult:null;
+  let wrapperPath='';
   state.running=id;renderList();
   try{
-    const runActions=buildRunActions(sc,inputValues);
+    const runActions=buildRunActions(sc,inputValues,sourceProbeResult);
     toast('Проверка DocumentBuilder...','ok');
     const probe=await ensureProbe(false);
     const out=mkOutputPath(sc,probe,tpl);
     toast('Выполнение сценария через DocumentBuilder...','ok');
     const runRequestId=reqId('docbuilder-run');
-    const runPayload={requestId:runRequestId,script:SCRIPT,openAfterRun:false,argument:{templatePath:tpl,outputPath:out,scenarioId:sc.id,scenarioName:sc.name,stopOnError:true,actions:runActions}};
-    const runPromise=runDb(runPayload); runPromise.catch(()=>{});
-    const fallbackMs=Math.max(8000,Math.min(120000,5000+(Array.isArray(runActions)?runActions.length:1)*1500));
-    const res=await Promise.race([runPromise,new Promise(resolve=>setTimeout(()=>resolve({ok:true,requestId:runRequestId,exitCode:0,fallback:true}),fallbackMs))]);
+    wrapperPath=await materializeDocbuilderScript(SCRIPT,{
+      templatePath:tpl,
+      outputPath:out,
+      scenarioId:sc.id,
+      scenarioName:sc.name,
+      stopOnError:true,
+      actions:runActions
+    },'run',{
+      TEMPLATE_PATH:tpl,
+      OUTPUT_PATH:out
+    });
+    const runPayload={requestId:runRequestId,script:wrapperPath,workDir:pickDocbuilderWorkDir(probe),outputPath:out,openAfterRun:false};
+    const runPromise=runDb(runPayload);
+    runPromise.catch(()=>{});
     let alreadyOpened=false;
-    if(res&&res.fallback){
+    const settled=await Promise.race([
+      runPromise.then(res=>({kind:'bridge',res})).catch(err=>({kind:'bridge_error',err})),
+      ensureOutputExists(out,90000).then(ok=>ok?{kind:'file'}:{kind:'run_timeout'})
+    ]);
+    if(settled.kind==='bridge'){
+      const res=settled.res;
+      if(!res||!res.ok){
+        const outputReadyAfterBridgeFail=await ensureOutputExists(out,3000);
+        if(!outputReadyAfterBridgeFail)throw dbErr(res||{error:'run_failed'});
+        clearPending(runRequestId);
+      }else{
+        if(typeof res.exitCode!=='number')throw dbErr({error:'invalid_run_response',details:'DocumentBuilder returned unexpected response payload.'});
+        alreadyOpened=!!res.opened;
+      }
+    }else if(settled.kind==='bridge_error'){
+      const outputReadyAfterError=await ensureOutputExists(out,3000);
+      if(!outputReadyAfterError)throw settled.err;
       clearPending(runRequestId);
-      toast('Нет ответа моста. Открываю результат напрямую...','ok');
+    }else if(settled.kind==='file'){
+      clearPending(runRequestId);
     }else{
-      if(!res||!res.ok)throw dbErr(res||{error:'run_failed'});
-      if(typeof res.exitCode!=='number')throw dbErr({error:'invalid_run_response',details:'DocumentBuilder returned unexpected response payload.'});
-      alreadyOpened=!!res.opened;
+      const outputReadyAfterTimeout=await ensureOutputExists(out,5000);
+      if(!outputReadyAfterTimeout)throw dbErr({error:'run_timeout',details:`DocumentBuilder не завершил генерацию за разумное время: ${out}`});
+      clearPending(runRequestId);
     }
+    const outputReady=await ensureOutputExists(out,4000);
+    if(!outputReady)throw dbErr({error:'output_not_created',details:`DocumentBuilder did not create the output file: ${out}`});
+    const finalReady=await ensureOutputExists(out,5000);
+    if(!finalReady)throw dbErr({error:'output_not_created',details:`Итоговый файл не найден: ${out}`});
     const i=state.scenarios.findIndex(x=>x.id===id);if(i>=0){state.scenarios[i].lastRunAt=new Date().toISOString();state.scenarios[i].updatedAt=new Date().toISOString();save();}
+    state.running=null;
     renderList();
     if(!alreadyOpened){
-      await new Promise(r=>setTimeout(r,350));
-      openResult(out,id);
+      setTimeout(()=>{try{openResult(out,id);}catch(_){ }},800);
     }
     toast(`Готово: ${out}`,'ok');
   }catch(err){
@@ -3409,7 +5091,10 @@ async function runScenario(id){
     const reason=d&&d.stderr?d.stderr:(d&&d.error?d.error:(err&&err.message?err.message:'Неизвестная ошибка'));
     toast(`Ошибка выполнения: ${reason}`,'error');
     state.probe=null;
-  }finally{state.running=null;renderList();}
+  }finally{
+    if(wrapperPath)deletePath(wrapperPath,2500).catch(()=>{});
+    state.running=null;renderList();
+  }
 }
 
 function pickTemplate(){
@@ -3453,15 +5138,31 @@ function bind(){
   els.btnSave&&els.btnSave.addEventListener('click',saveDraft);
   const addInputField=()=>{if(!state.draft)return;state.draft.inputFields.push(mkInputField());renderInputFields();};
   const addAction=()=>{if(!state.draft)return;state.draft.actions.push(mkAction('set_cell_value'));renderActions();};
+  const addSourceField=()=>{if(!state.draft)return;state.draft.sourceSchema.fields.push(mkSourceField());renderSourceConfig();renderActions();};
+  const addSourceList=()=>{if(!state.draft)return;state.draft.sourceSchema.lists.push(mkSourceList());renderSourceConfig();renderActions();};
+  const addSourceTable=()=>{if(!state.draft)return;state.draft.sourceSchema.tables.push(mkSourceTable());renderSourceConfig();renderActions();};
   els.btnAddInputField&&els.btnAddInputField.addEventListener('click',addInputField);
   els.btnAddInputFieldBottom&&els.btnAddInputFieldBottom.addEventListener('click',addInputField);
   els.btnAddAction&&els.btnAddAction.addEventListener('click',addAction);
   els.btnAddActionBottom&&els.btnAddActionBottom.addEventListener('click',addAction);
+  els.btnAddSourceField&&els.btnAddSourceField.addEventListener('click',addSourceField);
+  els.btnAddSourceList&&els.btnAddSourceList.addEventListener('click',addSourceList);
+  els.btnAddSourceTable&&els.btnAddSourceTable.addEventListener('click',addSourceTable);
   els.btnToggleInputSection&&els.btnToggleInputSection.addEventListener('click',()=>toggleSection('input'));
   els.btnToggleActionSection&&els.btnToggleActionSection.addEventListener('click',()=>toggleSection('action'));
   els.btnPick&&els.btnPick.addEventListener('click',pickTemplate);
   els.btnRunInputCancel&&els.btnRunInputCancel.addEventListener('click',()=>closeRunInputModal(null));
   els.btnRunInputSubmit&&els.btnRunInputSubmit.addEventListener('click',submitRunInputModal);
+  els.btnRunSourcePick&&els.btnRunSourcePick.addEventListener('click',pickRunSourceFile);
+  els.runSourceFileInput&&els.runSourceFileInput.addEventListener('change',()=>{
+    const file=els.runSourceFileInput.files&&els.runSourceFileInput.files[0];
+    if(!file)return;
+    if(file.path){
+      beginRunSourceProbe(file.path,file);
+      return;
+    }
+    toast('Не удалось получить путь к выбранному файлу.','error');
+  });
   els.btnListEditorClose&&els.btnListEditorClose.addEventListener('click',()=>closeListEditorModal(false));
   els.btnListEditorCancel&&els.btnListEditorCancel.addEventListener('click',()=>closeListEditorModal(false));
   els.btnListEditorApply&&els.btnListEditorApply.addEventListener('click',()=>closeListEditorModal(true));
@@ -3514,7 +5215,8 @@ async function init(){
   bind();
   syncSectionCollapseUi();
   renderList();
+  ensureProbe(false).catch(()=>{});
   window.ReportsDocBuilder={run:runDb,probe:probeDb};
 }
-init().catch(()=>{bind();syncSectionCollapseUi();renderList();});
+init().catch(()=>{bind();syncSectionCollapseUi();renderList();ensureProbe(false).catch(()=>{});});
 })();

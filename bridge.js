@@ -153,7 +153,9 @@
     var requestId = payload.requestId ? String(payload.requestId) : '';
     if (!requestId) return;
     var outPath = '';
-    if (payload.argument && typeof payload.argument === 'object' && payload.argument.outputPath) {
+    if (payload.outputPath) {
+      outPath = String(payload.outputPath);
+    } else if (payload.argument && typeof payload.argument === 'object' && payload.argument.outputPath) {
       outPath = String(payload.argument.outputPath);
     }
     if (!outPath) return;

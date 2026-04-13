@@ -1,8 +1,36 @@
-var input = (typeof Argument !== "undefined" && Argument) ? Argument : {};
-var templatePath = input.templatePath ? String(input.templatePath) : "";
-var outputPath = input.outputPath ? String(input.outputPath) : "";
-var actions = (input.actions && typeof input.actions.length === "number") ? input.actions : [];
-var stopOnError = (typeof input.stopOnError === "boolean") ? input.stopOnError : true;
+var input = (typeof input !== "undefined" && input) ? input : ((typeof Argument !== "undefined" && Argument) ? Argument : {});
+var templatePath = (typeof __REPORTS_templatePath !== "undefined" && __REPORTS_templatePath !== null) ? String(__REPORTS_templatePath) : (input.templatePath ? String(input.templatePath) : "");
+var outputPath = (typeof __REPORTS_outputPath !== "undefined" && __REPORTS_outputPath !== null) ? String(__REPORTS_outputPath) : (input.outputPath ? String(input.outputPath) : "");
+var inputActions = (typeof __REPORTS_actions !== "undefined" && __REPORTS_actions && typeof __REPORTS_actions.length === "number") ? __REPORTS_actions : ((input.actions && typeof input.actions.length === "number") ? input.actions : []);
+var actionsJson = (typeof __REPORTS_actionsJson !== "undefined" && __REPORTS_actionsJson !== null) ? String(__REPORTS_actionsJson) : "";
+var actions = [];
+var stopOnError = (typeof __REPORTS_stopOnError === "boolean") ? __REPORTS_stopOnError : ((typeof input.stopOnError === "boolean") ? input.stopOnError : true);
+var sourceFilePath = (typeof __REPORTS_sourceFilePath !== "undefined" && __REPORTS_sourceFilePath !== null) ? String(__REPORTS_sourceFilePath) : (input.sourceFilePath ? String(input.sourceFilePath) : "");
+var sourceFileConfigJson = (typeof __REPORTS_sourceFileConfigJson !== "undefined" && __REPORTS_sourceFileConfigJson !== null) ? String(__REPORTS_sourceFileConfigJson) : "";
+var sourceSchemaJson = (typeof __REPORTS_sourceSchemaJson !== "undefined" && __REPORTS_sourceSchemaJson !== null) ? String(__REPORTS_sourceSchemaJson) : "";
+var sourceFileConfig = input.sourceFileConfig || {};
+var sourceSchema = input.sourceSchema || {};
+
+function parseJsonSafe(text, fallback) {
+    var raw = String(text === undefined || text === null ? "" : text).trim();
+    if (!raw)
+        return fallback;
+    try {
+        return JSON.parse(raw);
+    } catch (e) {
+        return fallback;
+    }
+}
+
+actions = parseJsonSafe(actionsJson, inputActions);
+sourceFileConfig = parseJsonSafe(sourceFileConfigJson, sourceFileConfig);
+sourceSchema = parseJsonSafe(sourceSchemaJson, sourceSchema);
+if (!(actions && typeof actions.length === "number"))
+    actions = [];
+if (!sourceFileConfig || typeof sourceFileConfig !== "object")
+    sourceFileConfig = {};
+if (!sourceSchema || typeof sourceSchema !== "object")
+    sourceSchema = {};
 
 if (!templatePath)
     throw new Error("templatePath is required");
@@ -62,6 +90,153 @@ function colSpan(startCol, count) {
     var cnt = Math.max(1, toInt(count, 1));
     var endN = startN + cnt - 1;
     return numberToCol(startN) + ":" + numberToCol(endN);
+}
+
+function safeString(value) {
+    return (value === undefined || value === null) ? "" : String(value);
+}
+
+function normalizeKey(value) {
+    return safeString(value).trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function parseA1Cell(value) {
+    var m = safeString(value).trim().replace(/\$/g, "").toUpperCase().match(/^([A-Z]+)(\d+)$/);
+    if (!m)
+        return null;
+    return { col: colToNumber(m[1]), row: toInt(m[2], 0) };
+}
+
+function parseA1Range(value) {
+    var m = safeString(value).trim().replace(/\$/g, "").toUpperCase().match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/);
+    if (!m)
+        return null;
+    var c1 = colToNumber(m[1]);
+    var r1 = toInt(m[2], 0);
+    var c2 = colToNumber(m[3] || m[1]);
+    var r2 = toInt(m[4] || m[2], 0);
+    if (c1 < 1 || c2 < 1 || r1 < 1 || r2 < 1)
+        return null;
+    return {
+        c1: Math.min(c1, c2),
+        r1: Math.min(r1, r2),
+        c2: Math.max(c1, c2),
+        r2: Math.max(r1, r2)
+    };
+}
+
+function formatA1Range(range) {
+    if (!range)
+        return "";
+    var start = numberToCol(range.c1) + String(range.r1);
+    var end = numberToCol(range.c2) + String(range.r2);
+    return start === end ? start : start + ":" + end;
+}
+
+function shiftRangeToRow(range, rowNumber) {
+    var height = Math.max(0, range.r2 - range.r1);
+    return {
+        c1: range.c1,
+        c2: range.c2,
+        r1: rowNumber,
+        r2: rowNumber + height
+    };
+}
+
+function parseSourceMappings(raw) {
+    var text = safeString(raw).trim();
+    if (!text)
+        return [];
+    var lines = text.split(/\r?\n+/);
+    var out = [];
+    for (var i = 0; i < lines.length; i += 1) {
+        var row = safeString(lines[i]).trim();
+        if (!row)
+            continue;
+        var eq = row.indexOf("=");
+        if (eq <= 0)
+            continue;
+        var sourceKey = normalizeKey(row.slice(0, eq));
+        var targetColumn = safeString(row.slice(eq + 1)).trim().toUpperCase().replace(/[^A-Z]/g, "");
+        if (sourceKey && targetColumn)
+            out.push({ sourceKey: sourceKey, targetColumn: targetColumn });
+    }
+    return out;
+}
+
+function parseTargetBindings(raw) {
+    var text = safeString(raw).trim();
+    if (!text)
+        return [];
+    var chunks = text.split(/[;\n]+/);
+    var items = [];
+    for (var i = 0; i < chunks.length; i += 1) {
+        var block = safeString(chunks[i]).trim();
+        if (!block)
+            continue;
+        var sep = block.indexOf(":");
+        if (sep <= 0) {
+            var bang = block.indexOf("!");
+            if (bang > 0)
+                sep = bang;
+        }
+        if (sep <= 0)
+            throw new Error("Invalid insert target format: " + block);
+        var sheet = safeString(block.slice(0, sep)).trim();
+        var rawRanges = safeString(block.slice(sep + 1)).trim();
+        if (!sheet)
+            throw new Error("Missing sheet in insert target: " + block);
+        if (!rawRanges)
+            throw new Error("Missing addresses in insert target: " + block);
+        var ranges = rawRanges.split(",");
+        for (var r = 0; r < ranges.length; r += 1) {
+            var range = safeString(ranges[r]).trim();
+            if (!range)
+                continue;
+            items.push({ sheet: sheet, range: range });
+        }
+    }
+    return items;
+}
+
+function parseSourceTableTargets(raw) {
+    var text = safeString(raw).trim();
+    if (!text)
+        return [];
+    var chunks = text.split(/[;\n]+/);
+    var items = [];
+    for (var i = 0; i < chunks.length; i += 1) {
+        var block = safeString(chunks[i]).trim();
+        if (!block)
+            continue;
+        var sep = block.indexOf(":");
+        if (sep <= 0) {
+            var bang = block.indexOf("!");
+            if (bang > 0)
+                sep = bang;
+        }
+        if (sep <= 0)
+            throw new Error("Invalid table target format: " + block);
+        var sheet = safeString(block.slice(0, sep)).trim();
+        var payload = safeString(block.slice(sep + 1)).trim();
+        var pipe = payload.indexOf("|");
+        if (pipe <= 0)
+            throw new Error("Invalid table target format: " + block);
+        var anchorCell = safeString(payload.slice(0, pipe)).trim();
+        var templateRowRange = safeString(payload.slice(pipe + 1)).trim();
+        if (!sheet)
+            throw new Error("Missing sheet in table target: " + block);
+        if (!anchorCell)
+            throw new Error("Missing anchor cell in table target: " + block);
+        if (!templateRowRange)
+            throw new Error("Missing template row in table target: " + block);
+        items.push({
+            sheet: sheet,
+            anchorCell: anchorCell,
+            templateRowRange: templateRowRange
+        });
+    }
+    return items;
 }
 
 function sheetByRef(ref) {
@@ -209,7 +384,7 @@ function decimalsMask(value) {
 
 function normalizeCurrencySymbol(value) {
     var s = String(value === undefined || value === null ? "" : value).trim();
-    return s ? s : "₽";
+    return s ? s : "RUB";
 }
 
 function buildNumberFormat(action) {
@@ -243,7 +418,7 @@ function buildNumberFormat(action) {
     if (preset === "short_date")
         return "dd.mm.yyyy";
     if (preset === "long_date")
-        return "[$-419]dd mmmm yyyy г.";
+        return "[$-419]dd mmmm yyyy";
     if (preset === "time")
         return "hh:mm:ss";
     if (preset === "percent")
@@ -366,75 +541,419 @@ function groupSelection(sheet, rangeAddr, isRows, collapsed) {
     return true;
 }
 
+function sourceValueMode(type, value) {
+    if (type === "number")
+        return (value === "" || value === null || value === undefined) ? "text" : "number";
+    if (type === "date" && typeof value === "number")
+        return "number";
+    return "text";
+}
+
+function readCell(sheet, addr, type) {
+    var rng = rangeOn(sheet, addr);
+    var raw = "";
+    var text = "";
+    try {
+        raw = rng.GetValue();
+    } catch (eRaw) {
+        raw = "";
+    }
+    try {
+        text = rng.GetText();
+    } catch (eText) {
+        text = safeString(raw);
+    }
+    var value;
+    if (type === "number") {
+        if (typeof raw === "number")
+            value = raw;
+        else {
+            var num = Number(safeString(text || raw).replace(/\s+/g, "").replace(",", "."));
+            value = isNaN(num) ? "" : num;
+        }
+    } else if (type === "date") {
+        value = (typeof raw === "number") ? raw : safeString(text || raw).trim();
+    } else {
+        value = safeString(text || raw);
+    }
+    return { value: value, displayValue: safeString(text || raw).trim() };
+}
+
+function isFilled(value, type) {
+    if (type === "number")
+        return !(value === "" || value === null || value === undefined || isNaN(Number(value)));
+    return safeString(value).trim() !== "";
+}
+
+function getSheetOrNull(name) {
+    var sheet = Api.GetSheet(String(name || "").trim());
+    return sheet ? sheet : null;
+}
+
+function normSourceField(raw, index) {
+    var src = raw || {};
+    var type = safeString(src.type || "text").trim().toLowerCase();
+    if (type !== "number" && type !== "date")
+        type = "text";
+    return {
+        key: normalizeKey(src.key || ("field_" + String(index + 1))),
+        label: safeString(src.label || ("Field " + String(index + 1))).trim(),
+        sheet: safeString(src.sheet || "Sheet1").trim(),
+        address: safeString(src.address || "A1").trim(),
+        type: type,
+        required: !(src && src.required === false)
+    };
+}
+
+function normSourceList(raw, index, fallbackMaxRows) {
+    var src = raw || {};
+    var type = safeString(src.type || "text").trim().toLowerCase();
+    if (type !== "number" && type !== "date")
+        type = "text";
+    var direction = safeString(src.direction || "down").trim().toLowerCase();
+    if (direction !== "right")
+        direction = "down";
+    var stopMode = safeString(src.stopMode || "empty").trim().toLowerCase();
+    if (stopMode !== "stop_value")
+        stopMode = "empty";
+    return {
+        key: normalizeKey(src.key || ("list_" + String(index + 1))),
+        label: safeString(src.label || ("List " + String(index + 1))).trim(),
+        sheet: safeString(src.sheet || "Sheet1").trim(),
+        startAddress: safeString(src.startAddress || src.address || "A1").trim(),
+        direction: direction,
+        stopMode: stopMode,
+        stopValue: safeString(src.stopValue || "").trim(),
+        maxItems: Math.max(1, toInt(src.maxItems, fallbackMaxRows)),
+        type: type,
+        required: !(src && src.required === false)
+    };
+}
+
+function normSourceColumn(raw, index) {
+    var src = raw || {};
+    var type = safeString(src.type || "text").trim().toLowerCase();
+    if (type !== "number" && type !== "date")
+        type = "text";
+    return {
+        key: normalizeKey(src.key || ("column_" + String(index + 1))),
+        label: safeString(src.label || ("Column " + String(index + 1))).trim(),
+        header: safeString(src.header || src.label || ("Column " + String(index + 1))).trim(),
+        type: type,
+        required: !(src && src.required === false)
+    };
+}
+
+function normSourceTable(raw, index, fallbackMaxRows) {
+    var src = raw || {};
+    var sourceColumns = (src.columns && typeof src.columns.length === "number") ? src.columns : [];
+    var columns = [];
+    for (var i = 0; i < sourceColumns.length; i += 1)
+        columns.push(normSourceColumn(sourceColumns[i], i));
+    if (!columns.length)
+        columns.push(normSourceColumn({}, 0));
+    return {
+        key: normalizeKey(src.key || ("table_" + String(index + 1))),
+        label: safeString(src.label || ("Table " + String(index + 1))).trim(),
+        sheet: safeString(src.sheet || "Sheet1").trim(),
+        headerRow: Math.max(1, toInt(src.headerRow, 1)),
+        startRowOffset: Math.max(0, toInt(src.startRowOffset, 1)),
+        keyHeader: safeString(src.keyHeader || "").trim(),
+        emptyRowTolerance: Math.max(0, toInt(src.emptyRowTolerance, 1)),
+        maxRows: Math.max(1, toInt(src.maxRows, fallbackMaxRows)),
+        columns: columns,
+        required: !(src && src.required === false)
+    };
+}
+
+function buildHeaderMap(sheet, headerRow, scanColumns) {
+    var map = {};
+    for (var col = 1; col <= scanColumns; col += 1) {
+        var text = readCell(sheet, numberToCol(col) + String(headerRow), "text").displayValue;
+        var key = normalizeKey(text);
+        if (key && map[key] === undefined)
+            map[key] = col;
+    }
+    return map;
+}
+
+function collectSourceLists(schemaLists, strictMode, fallbackMaxRows, result) {
+    for (var i = 0; i < schemaLists.length; i += 1) {
+        var list = normSourceList(schemaLists[i], i, fallbackMaxRows);
+        var listSheet = getSheetOrNull(list.sheet);
+        if (!listSheet) {
+            if (list.required || strictMode)
+                throw new Error("Sheet not found: " + list.sheet + " for list \"" + list.label + "\".");
+            continue;
+        }
+        var startCell = parseA1Cell(list.startAddress);
+        if (!startCell)
+            throw new Error("Invalid start cell: \"" + list.startAddress + "\" for list \"" + list.label + "\".");
+        var stopToken = normalizeKey(list.stopValue);
+        var items = [];
+        for (var offset = 0; offset < list.maxItems; offset += 1) {
+            var col = startCell.col + (list.direction === "right" ? offset : 0);
+            var row = startCell.row + (list.direction === "down" ? offset : 0);
+            var addr = numberToCol(col) + String(row);
+            var listCell = readCell(listSheet, addr, list.type);
+            var displayValue = safeString(listCell.displayValue).trim();
+            if (list.stopMode === "stop_value") {
+                if (!displayValue)
+                    break;
+                if (stopToken && normalizeKey(displayValue) === stopToken)
+                    break;
+            } else if (!isFilled(listCell.value, list.type)) {
+                break;
+            }
+            items.push(listCell.value);
+        }
+        if (list.required && !items.length)
+            throw new Error("List \"" + list.label + "\" has no data.");
+        result.lists[list.key] = {
+            key: list.key,
+            label: list.label,
+            type: list.type,
+            items: items
+        };
+    }
+}
+
+function collectSourceData() {
+    var result = { fields: {}, lists: {}, tables: {} };
+    var schemaFields = (sourceSchema.fields && typeof sourceSchema.fields.length === "number") ? sourceSchema.fields : [];
+    var schemaLists = (sourceSchema.lists && typeof sourceSchema.lists.length === "number") ? sourceSchema.lists : [];
+    var schemaTables = (sourceSchema.tables && typeof sourceSchema.tables.length === "number") ? sourceSchema.tables : [];
+    var strictMode = !(sourceFileConfig && sourceFileConfig.strictMode === false);
+    var fallbackMaxRows = Math.max(1, toInt(sourceFileConfig.maxRowsDefault, 200));
+
+    for (var i = 0; i < schemaFields.length; i += 1) {
+        var field = normSourceField(schemaFields[i], i);
+        var fieldSheet = getSheetOrNull(field.sheet);
+        if (!fieldSheet) {
+            if (field.required || strictMode)
+                throw new Error("Sheet not found: " + field.sheet + " for field \"" + field.label + "\".");
+            continue;
+        }
+        var fieldCell = readCell(fieldSheet, field.address, field.type);
+        if (field.required && !isFilled(fieldCell.value, field.type))
+            throw new Error("Required field is empty: \"" + field.label + "\".");
+        result.fields[field.key] = {
+            key: field.key,
+            label: field.label,
+            type: field.type,
+            value: fieldCell.value,
+            displayValue: fieldCell.displayValue
+        };
+    }
+
+    collectSourceLists(schemaLists, strictMode, fallbackMaxRows, result);
+
+    for (var t = 0; t < schemaTables.length; t += 1) {
+        var table = normSourceTable(schemaTables[t], t, fallbackMaxRows);
+        var tableSheet = getSheetOrNull(table.sheet);
+        if (!tableSheet) {
+            if (table.required || strictMode)
+                throw new Error("Sheet not found: " + table.sheet + " for table \"" + table.label + "\".");
+            continue;
+        }
+        var scanColumns = Math.max(64, table.columns.length * 8, colToNumber("CZ"));
+        var headerMap = buildHeaderMap(tableSheet, table.headerRow, scanColumns);
+        var keyColumn = headerMap[normalizeKey(table.keyHeader)];
+        if (!keyColumn)
+            throw new Error("Key column not found: \"" + table.keyHeader + "\" in table \"" + table.label + "\".");
+        var resolvedColumns = [];
+        for (var c = 0; c < table.columns.length; c += 1) {
+            var column = table.columns[c];
+            var headerIndex = headerMap[normalizeKey(column.header)];
+            if (!headerIndex && column.required)
+                throw new Error("Column not found: \"" + column.header + "\" in table \"" + table.label + "\".");
+            resolvedColumns.push({
+                key: column.key,
+                label: column.label,
+                type: column.type,
+                colIndex: headerIndex || 0
+            });
+        }
+        var startRow = table.headerRow + table.startRowOffset;
+        var rows = [];
+        var emptyStreak = 0;
+        for (var rowOffset = 0; rowOffset < table.maxRows; rowOffset += 1) {
+            var rowNumber = startRow + rowOffset;
+            var keyCell = readCell(tableSheet, numberToCol(keyColumn) + String(rowNumber), "text");
+            if (!isFilled(keyCell.value, "text")) {
+                emptyStreak += 1;
+                if (emptyStreak > table.emptyRowTolerance)
+                    break;
+                continue;
+            }
+            emptyStreak = 0;
+            var row = {};
+            for (var rc = 0; rc < resolvedColumns.length; rc += 1) {
+                var resolved = resolvedColumns[rc];
+                var dataCell = resolved.colIndex ? readCell(tableSheet, numberToCol(resolved.colIndex) + String(rowNumber), resolved.type) : { value: "", displayValue: "" };
+                row[resolved.key] = dataCell.value;
+            }
+            rows.push(row);
+        }
+        if (table.required && !rows.length)
+            throw new Error("Table \"" + table.label + "\" has no data.");
+        result.tables[table.key] = {
+            key: table.key,
+            label: table.label,
+            columns: resolvedColumns,
+            rows: rows
+        };
+    }
+    return result;
+}
+
+function requireSourceField(key) {
+    var id = normalizeKey(key);
+    if (!id || !sourceData.fields[id])
+        throw new Error("Source field not found: \"" + safeString(key) + "\".");
+    return sourceData.fields[id];
+}
+
+function requireSourceList(key) {
+    var id = normalizeKey(key);
+    if (!id || !sourceData.lists[id])
+        throw new Error("Source list not found: \"" + safeString(key) + "\".");
+    return sourceData.lists[id];
+}
+
+function requireSourceTable(key) {
+    var id = normalizeKey(key);
+    if (!id || !sourceData.tables[id])
+        throw new Error("Source table not found: \"" + safeString(key) + "\".");
+    return sourceData.tables[id];
+}
+
+function copyTemplateRowStyle(fromSheet, toSheet, templateRangeRaw, targetCellRaw) {
+    var templateRange = parseA1Range(templateRangeRaw);
+    var targetCell = parseA1Cell(targetCellRaw);
+    var targetRange;
+    var targetA1 = "";
+    var offset = 0;
+    var srcCell;
+    var dstCell;
+    var formula = "";
+    var value = "";
+    if (!templateRange)
+        throw new Error("Invalid template row: " + safeString(templateRangeRaw));
+    if (templateRange.r1 !== templateRange.r2)
+        throw new Error("Template row must be a single-row range.");
+    if (!targetCell)
+        throw new Error("Invalid target cell: " + safeString(targetCellRaw));
+    targetRange = {
+        c1: targetCell.col,
+        c2: targetCell.col + (templateRange.c2 - templateRange.c1),
+        r1: targetCell.row,
+        r2: targetCell.row
+    };
+    rangeOn(fromSheet, formatA1Range(templateRange)).Copy();
+    rangeOn(toSheet, numberToCol(targetRange.c1) + String(targetRange.r1)).PasteSpecial("xlPasteAll", "xlPasteSpecialOperationNone", false, false);
+    targetA1 = formatA1Range(targetRange);
+    for (offset = 0; offset <= (templateRange.c2 - templateRange.c1); offset += 1) {
+        srcCell = rangeOn(fromSheet, numberToCol(templateRange.c1 + offset) + String(templateRange.r1));
+        dstCell = rangeOn(toSheet, numberToCol(targetRange.c1 + offset) + String(targetRange.r1));
+        formula = "";
+        value = "";
+        try {
+            formula = safeString(srcCell.GetFormula()).trim();
+        } catch (eFormula) {
+            formula = "";
+        }
+        if (formula && formula.charAt(0) === "=") {
+            dstCell.SetValue(formula);
+            continue;
+        }
+        try {
+            value = srcCell.GetValue();
+        } catch (eValue) {
+            value = "";
+        }
+        dstCell.SetValue(value);
+    }
+    // DocumentBuilder paste keeps fill/font but may drop side/bottom borders on inserted rows.
+    // Re-apply a standard tabular border set so duplicated template rows stay visually intact.
+    applyBorders(rangeOn(toSheet, targetA1), "all", "Thin", "#000000");
+}
+
+function applySetCellValueAction(action, forcedValue, forcedMode) {
+    var sh = sheetByRef(action.sheet);
+    var rng = rangeOn(sh, action.range || "A1", action.named_range);
+    var mode = String((forcedMode === undefined || forcedMode === null) ? (action.mode || "text") : forcedMode).toLowerCase();
+    var value = (forcedValue === undefined) ? action.value : forcedValue;
+    if (mode === "number") {
+        var num = Number(value);
+        value = isNaN(num) ? 0 : num;
+    } else if (mode === "bool") {
+        value = toBool(value, false);
+    } else if (mode === "formula") {
+        value = String(value || "");
+        if (value && value.charAt(0) !== "=")
+            value = "=" + value;
+    } else {
+        value = (value === undefined || value === null) ? "" : String(value);
+    }
+    rng.SetValue(value);
+    if (toBool(action.merge, false))
+        rng.Merge(false);
+    var hasKeepFlag = !(action.keep_template_format === undefined || action.keep_template_format === null || String(action.keep_template_format).trim() === "");
+    var hasLegacyApply = !(action.apply_style === undefined || action.apply_style === null);
+    var legacyApply = toBool(action.apply_style, false);
+    var applyAlignment = toBool(action.apply_alignment, hasLegacyApply ? legacyApply : false);
+    var applyNumberFormat = toBool(action.apply_number_format, false);
+    var applyFont = toBool(action.apply_font, false);
+    var applyFill = toBool(action.apply_fill, false);
+    var keepTemplate = hasKeepFlag ? toBool(action.keep_template_format, true) : !(applyAlignment || applyNumberFormat || applyFont || applyFill || legacyApply);
+    if (keepTemplate)
+        return;
+    if (applyAlignment) {
+        var insH = String(action.horizontal || "").trim().toLowerCase();
+        var insV = String(action.vertical || "").trim().toLowerCase();
+        if (insH)
+            rng.SetAlignHorizontal(insH);
+        if (insV)
+            rng.SetAlignVertical(insV);
+        rng.SetWrap(toBool(action.wrap, false));
+    }
+    if (applyNumberFormat) {
+        var insFmt = buildNumberFormat(action);
+        rng.SetNumberFormat(insFmt);
+    }
+    if (applyFont) {
+        var insFontName = String(action.font_name || "").trim();
+        var insFontSize = toNumber(action.font_size, NaN);
+        if (insFontName)
+            rng.SetFontName(insFontName);
+        if (!isNaN(insFontSize) && insFontSize > 0)
+            rng.SetFontSize(insFontSize);
+        rng.SetBold(toBool(action.bold, false));
+        rng.SetItalic(toBool(action.italic, false));
+        rng.SetUnderline(normalizeUnderline(action.underline));
+        rng.SetStrikeout(toBool(action.strikeout, false));
+        var insFontColorRaw = String(action.font_color === undefined || action.font_color === null ? "" : action.font_color).trim().toLowerCase();
+        if (insFontColorRaw && insFontColorRaw !== "auto")
+            rng.SetFontColor(colorFromHex(action.font_color));
+    }
+    if (applyFill) {
+        if (isNoFill(action.fill_color))
+            rng.SetFillColor("No Fill");
+        else
+            rng.SetFillColor(colorFromHex(action.fill_color));
+    }
+}
+
+var sourceData = { fields: {}, lists: {}, tables: {} };
+
 function executeAction(action) {
     var type = String(action.type || "");
     if (!type)
         return;
 
     if (type === "set_cell_value") {
-        var sh = sheetByRef(action.sheet);
-        var rng = rangeOn(sh, action.range || "A1", action.named_range);
-        var mode = String(action.mode || "text").toLowerCase();
-        var value = action.value;
-        if (mode === "number") {
-            var num = Number(value);
-            value = isNaN(num) ? 0 : num;
-        } else if (mode === "bool") {
-            value = toBool(value, false);
-        } else if (mode === "formula") {
-            value = String(value || "");
-            if (value && value.charAt(0) !== "=")
-                value = "=" + value;
-        } else {
-            value = (value === undefined || value === null) ? "" : String(value);
-        }
-        rng.SetValue(value);
-        if (toBool(action.merge, false))
-            rng.Merge(false);
-        var hasKeepFlag = !(action.keep_template_format === undefined || action.keep_template_format === null || String(action.keep_template_format).trim() === "");
-        var hasLegacyApply = !(action.apply_style === undefined || action.apply_style === null);
-        var legacyApply = toBool(action.apply_style, false);
-        var applyAlignment = toBool(action.apply_alignment, hasLegacyApply ? legacyApply : false);
-        var applyNumberFormat = toBool(action.apply_number_format, false);
-        var applyFont = toBool(action.apply_font, false);
-        var applyFill = toBool(action.apply_fill, false);
-        var keepTemplate = hasKeepFlag ? toBool(action.keep_template_format, true) : !(applyAlignment || applyNumberFormat || applyFont || applyFill || legacyApply);
-        if (keepTemplate)
-            return;
-        if (applyAlignment) {
-            var insH = String(action.horizontal || "").trim().toLowerCase();
-            var insV = String(action.vertical || "").trim().toLowerCase();
-            if (insH)
-                rng.SetAlignHorizontal(insH);
-            if (insV)
-                rng.SetAlignVertical(insV);
-            rng.SetWrap(toBool(action.wrap, false));
-        }
-        if (applyNumberFormat) {
-            var insFmt = buildNumberFormat(action);
-            rng.SetNumberFormat(insFmt);
-        }
-        if (applyFont) {
-            var insFontName = String(action.font_name || "").trim();
-            var insFontSize = toNumber(action.font_size, NaN);
-            if (insFontName)
-                rng.SetFontName(insFontName);
-            if (!isNaN(insFontSize) && insFontSize > 0)
-                rng.SetFontSize(insFontSize);
-            rng.SetBold(toBool(action.bold, false));
-            rng.SetItalic(toBool(action.italic, false));
-            rng.SetUnderline(normalizeUnderline(action.underline));
-            rng.SetStrikeout(toBool(action.strikeout, false));
-            var insFontColorRaw = String(action.font_color === undefined || action.font_color === null ? "" : action.font_color).trim().toLowerCase();
-            if (insFontColorRaw && insFontColorRaw !== "auto")
-                rng.SetFontColor(colorFromHex(action.font_color));
-        }
-        if (applyFill) {
-            if (isNoFill(action.fill_color))
-                rng.SetFillColor("No Fill");
-            else
-                rng.SetFillColor(colorFromHex(action.fill_color));
-        }
+        applySetCellValueAction(action);
         return;
     }
 
@@ -637,6 +1156,13 @@ function executeAction(action) {
         return;
     }
 
+    if (type === "copy_template_row") {
+        var shTemplateFrom = sheetByRef(action.from_sheet);
+        var shTemplateTo = sheetByRef(action.to_sheet === undefined || action.to_sheet === null || action.to_sheet === "" ? action.from_sheet : action.to_sheet);
+        copyTemplateRowStyle(shTemplateFrom, shTemplateTo, action.from_range || "A1:A1", action.to_cell || "A1");
+        return;
+    }
+
     if (type === "sort_range") {
         var shSort = sheetByRef(action.sheet);
         var rgSort = rangeOn(shSort, action.range || "A1");
@@ -698,14 +1224,155 @@ function executeAction(action) {
         return;
     }
 
+    if (type === "insert_source_field") {
+        var sourceField = requireSourceField(action.source_field_id);
+        var targets = parseTargetBindings(action.targets);
+        if (!targets.length) {
+            targets.push({
+                sheet: safeString(action.sheet || "Sheet1").trim() || "Sheet1",
+                range: safeString(action.range || "A1").trim() || "A1"
+            });
+        }
+        for (var ti = 0; ti < targets.length; ti += 1) {
+            applySetCellValueAction({
+                sheet: targets[ti].sheet,
+                range: targets[ti].range,
+                named_range: false,
+                merge: false,
+                keep_template_format: action.keep_template_format
+            }, sourceField.value, sourceValueMode(sourceField.type, sourceField.value));
+        }
+        return;
+    }
+
+    if (type === "insert_source_list") {
+        var sourceList = requireSourceList(action.source_list_id);
+        var listTargets = parseSourceTableTargets(action.targets);
+        if (!listTargets.length) {
+            listTargets.push({
+                sheet: safeString(action.sheet || "Sheet1").trim() || "Sheet1",
+                anchorCell: safeString(action.anchor_cell || "A1").trim() || "A1",
+                templateRowRange: safeString(action.template_row_range || "A1:D1").trim() || "A1:D1"
+            });
+        }
+        var resolvedListTargets = [];
+        for (var lti = 0; lti < listTargets.length; lti += 1) {
+            var listTarget = listTargets[lti];
+            var listAnchor = parseA1Cell(listTarget.anchorCell);
+            if (!listAnchor)
+                throw new Error("Invalid row anchor cell: " + safeString(listTarget.anchorCell));
+            resolvedListTargets.push({
+                order: lti,
+                sheet: listTarget.sheet,
+                anchor: listAnchor,
+                templateRowRange: listTarget.templateRowRange
+            });
+        }
+        var listInsertMode = safeString(action.insert_mode || "insert_rows").trim().toLowerCase();
+        if (listInsertMode === "insert_rows" && resolvedListTargets.length > 1) {
+            resolvedListTargets.sort(function (left, right) {
+                if (left.sheet === right.sheet)
+                    return right.anchor.row - left.anchor.row;
+                return left.order - right.order;
+            });
+        }
+        for (var targetIndex = 0; targetIndex < resolvedListTargets.length; targetIndex += 1) {
+            var listTargetSpec = resolvedListTargets[targetIndex];
+            var listTargetSheet = sheetByRef(listTargetSpec.sheet);
+            for (var itemIndex = 0; itemIndex < sourceList.items.length; itemIndex += 1) {
+                var targetRow = listTargetSpec.anchor.row + itemIndex;
+                if (listInsertMode === "insert_rows" && itemIndex > 0)
+                    rangeOn(listTargetSheet, String(targetRow) + ":" + String(targetRow)).Insert("down");
+                if (toBool(action.keep_template_format, true) && (itemIndex > 0 || listInsertMode !== "insert_rows"))
+                    copyTemplateRowStyle(listTargetSheet, listTargetSpec.templateRowRange, targetRow);
+                var itemValue = sourceList.items[itemIndex];
+                applySetCellValueAction({
+                    sheet: listTargetSpec.sheet,
+                    range: numberToCol(listTargetSpec.anchor.col) + String(targetRow),
+                    named_range: false,
+                    merge: false,
+                    keep_template_format: action.keep_template_format
+                }, itemValue, sourceValueMode(sourceList.type, itemValue));
+            }
+        }
+        return;
+    }
+
+    if (type === "insert_source_table") {
+        var sourceTable = requireSourceTable(action.source_table_id);
+        var mappings = parseSourceMappings(action.mappings);
+        if (!mappings.length)
+            throw new Error("Column mappings are required for source table.");
+        var insertMode = safeString(action.insert_mode || "insert_rows").trim().toLowerCase();
+        var targets = parseSourceTableTargets(action.targets);
+        if (!targets.length) {
+            targets.push({
+                sheet: safeString(action.sheet || "Sheet1").trim() || "Sheet1",
+                anchorCell: safeString(action.anchor_cell || "A1").trim() || "A1",
+                templateRowRange: safeString(action.template_row_range || "A1:D1").trim() || "A1:D1"
+            });
+        }
+        var resolvedTargets = [];
+        for (var ti = 0; ti < targets.length; ti += 1) {
+            var target = targets[ti];
+            var anchor = parseA1Cell(target.anchorCell);
+            if (!anchor)
+                throw new Error("Invalid row anchor cell: " + safeString(target.anchorCell));
+            resolvedTargets.push({
+                order: ti,
+                sheet: target.sheet,
+                anchor: anchor,
+                templateRowRange: target.templateRowRange
+            });
+        }
+        if (insertMode === "insert_rows" && resolvedTargets.length > 1) {
+            resolvedTargets.sort(function (left, right) {
+                if (left.sheet === right.sheet)
+                    return right.anchor.row - left.anchor.row;
+                return left.order - right.order;
+            });
+        }
+        for (var targetIndex = 0; targetIndex < resolvedTargets.length; targetIndex += 1) {
+            var targetSpec = resolvedTargets[targetIndex];
+            var targetSheet = sheetByRef(targetSpec.sheet);
+            for (var rowIndex = 0; rowIndex < sourceTable.rows.length; rowIndex += 1) {
+                var targetRow = targetSpec.anchor.row + rowIndex;
+                if (insertMode === "insert_rows" && rowIndex > 0)
+                    rangeOn(targetSheet, String(targetRow) + ":" + String(targetRow)).Insert("down");
+                if (toBool(action.keep_template_format, true) && (rowIndex > 0 || insertMode !== "insert_rows"))
+                    copyTemplateRowStyle(targetSheet, targetSpec.templateRowRange, targetRow);
+                var rowData = sourceTable.rows[rowIndex];
+                for (var m = 0; m < mappings.length; m += 1) {
+                    var mapping = mappings[m];
+                    var cellValue = rowData[mapping.sourceKey];
+                    var typeHint = "text";
+                    for (var ci = 0; ci < sourceTable.columns.length; ci += 1) {
+                        if (sourceTable.columns[ci].key === mapping.sourceKey) {
+                            typeHint = sourceTable.columns[ci].type;
+                            break;
+                        }
+                    }
+                    applySetCellValueAction({
+                        sheet: targetSpec.sheet,
+                        range: mapping.targetColumn + String(targetRow),
+                        named_range: false,
+                        merge: false,
+                        keep_template_format: action.keep_template_format
+                    }, cellValue, sourceValueMode(typeHint, cellValue));
+                }
+            }
+        }
+        return;
+    }
+
     if (type === "add_sheet") {
-        Api.AddSheet(String(action.sheet_name || "НовыйЛист"));
+        Api.AddSheet(String(action.sheet_name || "NewSheet"));
         return;
     }
 
     if (type === "rename_sheet") {
         var shRename = sheetByRef(action.sheet);
-        shRename.SetName(String(action.new_name || "Лист"));
+        shRename.SetName(String(action.new_name || "Sheet"));
         return;
     }
 
@@ -716,7 +1383,7 @@ function executeAction(action) {
     }
 }
 
-builder.OpenFile("jsValue(templatePath)", "");
+builder.OpenFile("__REPORTS_LITERAL_TEMPLATE_PATH__", "");
 for (var i = 0; i < actions.length; i += 1) {
     try {
         executeAction(actions[i]);
@@ -725,5 +1392,5 @@ for (var i = 0; i < actions.length; i += 1) {
             throw e;
     }
 }
-builder.SaveFile("xlsx", "jsValue(outputPath)");
+builder.SaveFile("xlsx", "__REPORTS_LITERAL_OUTPUT_PATH__");
 builder.CloseFile();

@@ -4,14 +4,14 @@
   <meta charset="utf-8" />
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Отчеты</title>
+  <title>Отчёты</title>
   <link rel="stylesheet" href="app.css" />
 </head>
 <body>
   <div class="reports-app">
     <header class="topbar">
       <div>
-        <h1 class="title">Отчеты</h1>
+        <h1 class="title">Отчёты</h1>
         <p class="subtitle">Сценарии генерации через DocumentBuilder</p>
       </div>
       <div class="topbar-actions">
@@ -86,6 +86,21 @@
 
       <section class="modal-section">
         <div class="section-head">
+          <h3>Источник данных из файла</h3>
+          <div class="section-actions">
+            <button id="btn-add-source-field" class="btn btn-secondary" type="button">Добавить поле</button>
+            <button id="btn-add-source-list" class="btn btn-secondary" type="button">Добавить список</button>
+            <button id="btn-add-source-table" class="btn btn-secondary" type="button">Добавить таблицу</button>
+          </div>
+        </div>
+        <div class="section-body">
+          <p class="section-note">Настройка чтения входного файла `.xlsx` или `.xls` перед генерацией.</p>
+          <div id="source-config-root" class="source-config-root"></div>
+        </div>
+      </section>
+
+      <section class="modal-section">
+        <div class="section-head">
           <h3>Действия сценария</h3>
           <div class="section-actions">
             <button id="btn-add-action" class="btn btn-secondary" type="button">Добавить действие</button>
@@ -120,6 +135,30 @@
       </header>
       <section class="modal-section">
         <div id="run-input-fields" class="run-input-fields"></div>
+      </section>
+      <section id="run-source-section" class="modal-section hidden">
+        <div class="run-source-head">
+          <div>
+            <h3 class="run-source-title">Файл с исходными данными</h3>
+            <p id="run-source-subtitle" class="modal-subtitle">Выберите файл и дождитесь проверки структуры.</p>
+          </div>
+          <button id="btn-run-source-pick" class="btn btn-secondary" type="button">Выбрать файл</button>
+          <input id="run-source-file-input" type="file" accept=".xlsx,.xls,.xlsm" hidden />
+        </div>
+        <div class="run-source-panel">
+          <div class="run-source-file-row">
+            <span class="run-source-file-label">Файл</span>
+            <div class="run-source-file-value">
+              <input id="run-source-file-path" type="text" readonly placeholder="Файл не выбран" />
+            </div>
+          </div>
+          <div id="run-source-status" class="run-source-status is-idle">
+            <div class="run-source-status-bar"><span></span></div>
+            <div id="run-source-status-text" class="run-source-status-text">Файл не выбран</div>
+          </div>
+          <div id="run-source-error" class="run-source-error hidden"></div>
+          <div id="run-source-preview" class="run-source-preview hidden"></div>
+        </div>
       </section>
       <footer class="modal-footer">
         <button id="btn-run-input-submit" class="btn btn-primary" type="button">Сгенерировать</button>
@@ -173,6 +212,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=20260218-02"></script>
+  <script src="app.js?v=20260406-01"></script>
 </body>
 </html>
